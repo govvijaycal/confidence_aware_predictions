@@ -1,0 +1,4 @@
+For the NuScenes dataset, the following stats were given:
+train_val -> Finished writing: 9 splits, 7884 entries written out of 8560
+val       -> Finished writing: 10 splits, 8379 entries written out of 9041
+train     -> Finished writing: 33 splits, 29808 entries written out of 32186
