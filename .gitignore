@@ -1,5 +1,6 @@
 # Custom additions to below:
 *.record
+*.png
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

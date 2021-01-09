@@ -115,7 +115,8 @@ def _parse_function(proto):
 		data_dict[key] = parsed_features[key]
 
 	for key in ['velocity', 'acceleration', 'yaw_rate']:
-		data_dict[key] = tf.io.parse_tensor(parsed_features[key], out_type=tf.float64)
+		data_dict[key] = tf.reshape(tf.io.parse_tensor(parsed_features[key], out_type=tf.float64), (1,))
+
 
 	for key in ['pose', 'past_poses_local', 'future_poses_local']:
 		value   = tf.io.parse_tensor(parsed_features[key], out_type=tf.float64)
