@@ -85,7 +85,6 @@ class MultiPath(object):
 			         bias_regularizer=l2(1e-3))(y)
 
 		model = Model(inputs=[image_input, state_input], outputs=pred)
-		import pdb; pdb.set_trace()
 
 		model.compile(loss=self.likelihood_loss(), 
 			          metrics=self.ade(),
@@ -130,7 +129,7 @@ class MultiPath(object):
 			# Tensor dimensions are as follows.  Let us define:
 			# N_B = batch_size; N_A = number of anchors; N_T = number of timesteps.
 			# y_true: N_B x N_T x 2, actual XY trajectory taken
-			# y_pred: N_B x N_A x (1 + 5*N_T), GMM mode probabilities (anchor probs) 
+			# y_pred: N_B x (N_A x (1 + 5*N_T)), GMM mode probabilities (anchor probs) 
 			#         and offset trajectory parameters [mux, muy, log(stdx), log(stdy), rho_xy]
 			batch_size         = y_true.shape[0]
 			trajectories       = tf.reshape(y_pred[:,:-self.num_anchors], 
@@ -159,18 +158,18 @@ class MultiPath(object):
 			# residual_trajs is the difference between the nearest_trajs and the actual trajectory.
 			trajectories_xy = trajectories[:, :, :, :2] + self.anchors
 			nearest_trajs   = tf.gather_nd(trajectories_xy, nearest_mode_indices)						
-			residual_trajs  = nearest_trajs - y_true
+			residual_trajs  = y_true - nearest_trajs
 
 			# All variables in this code block have shape N_B x N_T.
 			# They include the differences to the active mean (dx, dy) and
 			# the covariance parameters (log_stdx, log_stdy, rho_xy).
 			dx = residual_trajs[:, :, 0]
 			dy = residual_trajs[:, :, 1]
-			log_stdx = tf.gather_nd(trajectories[:,:,:,2], nearest_mode_indices)
-			log_stdy = tf.gather_nd(trajectories[:,:,:,3], nearest_mode_indices)
+			log_stdx = tf.nn.relu(tf.gather_nd(trajectories[:,:,:,2], nearest_mode_indices))
+			log_stdy = tf.nn.relu(tf.gather_nd(trajectories[:,:,:,3], nearest_mode_indices))
 			stdx     = tf.math.exp(log_stdx)
 			stdy     = tf.math.exp(log_stdy)
-			rho_xy   = tf.math.tanh( 
+			rho_xy   = 0.9*tf.math.tanh( 
 			               tf.gather_nd(trajectories[:,:,:,4], nearest_mode_indices) 
 			               ) # rho in [-1, 1]
 		
