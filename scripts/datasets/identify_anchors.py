@@ -48,6 +48,52 @@ def length_curv_to_trajectories(length_curv_list, num_timesteps=12):
 		trajectories.append(np.column_stack((xs, ys)))	
 	return np.array(trajectories)
 
+def resample_length_curvature(trajectory_dataset):
+	# Approximate curvature just with endpoints yaw difference / length for simplicity.
+	length = np.sum( np.linalg.norm(trajectory_dataset[:,1:,:2] - trajectory_dataset[:,:-1,:2], 
+		                            axis=-1), axis=-1)
+	curv   = (trajectory_dataset[:, -1, 2] - trajectory_dataset[:, 0, 2]) / length
+
+	# curv_mids   = np.arange(-0.0975, 0.1, 0.005)
+	# length_mids = np.arange(10., 90., 20.)
+
+	# curv_assignments   = np.argmin(np.column_stack([
+	# 	np.fabs(curv - mcurv) for mcurv in curv_mids]), axis=-1)
+	# length_assignments = np.argmin(np.column_stack([np.fabs(length - mlength) for mlength in length_mids]), axis=-1)
+	
+	# partitions = {}
+
+	# for ind_curv, mcurv in enumerate(curv_mids):
+	# 	for ind_length, mlength in enumerate(length_mids):
+	# 		in_curv_bin = set([x for x in np.ravel(np.argwhere(curv_assignments == ind_curv))])
+	# 		in_length_bin = set([x for x in np.ravel(np.argwhere(length_assignments == ind_length))])
+	# 		in_bin = in_curv_bin.intersection(in_length_bin)
+	# 		partitions['{}_{}'.format(ind_curv, ind_length)] = in_bin
+
+	# num_valid_partitions = 0
+	# for key in partitions.keys():
+	# 	if len(partitions[key]) > 0:
+	# 		ind_curv, ind_length = [int(x) for x in key.split('_')]
+	# 		val_curv, val_length = curv_mids[ind_curv], length_mids[ind_length]
+	# 		print('{} curv, {} length: {} entries'.format(val_curv, val_length, len(partitions[key])))
+	# 		num_valid_partitions += 1
+	# print('{} valid of {} total partitions'.format(num_valid_partitions, len(partitions.keys())) ) 
+
+	stationary_indices = np.argwhere( length < 4.)
+	slow_indices       = np.argwhere( np.logical_and(length >= 4., length < 8.) )
+	straight_indices   = np.argwhere( np.logical_and(length >= 8., np.abs(curv * length) < np.radians(5.)) )
+	sleft_indices   = np.argwhere( np.logical_and(length >= 8., 
+		                                          np.logical_and(curv * length >= np.radians(5.), curv * length < np.radians(30)) 
+		                                          ))
+	sright_indices   = np.argwhere( np.logical_and(length >= 8., 
+		                                          np.logical_and(curv * length <= np.radians(-5.), curv * length > np.radians(-30)) 
+		                                          ))
+	left_indices = np.argwhere( np.logical_and(length >= 8., curv * length >= np.radians(30.)) )
+	right_indices = np.argwhere( np.logical_and(length >= 8., curv * length <= np.radians(-30.)) )
+	import pdb;
+	pdb.set_trace()
+
+
 def identify_clusters_length_curvature(trajectory_dataset, n_clusters=16):
 	# Approximate curvature just with endpoints yaw difference / length for simplicity.
 	length = np.sum( np.linalg.norm(trajectory_dataset[:,1:,:2] - trajectory_dataset[:,:-1,:2], 
@@ -157,8 +203,33 @@ def identify_clusters(trajectory_dataset, n_clusters=16):
 
 	return traj_clusters
 
+def get_anchor_weights(anchors, trajectory_dataset):
+	trajectories_xy = trajectory_dataset[:, :, :2]
+
+	anchor_dists = np.column_stack([np.sum(np.linalg.norm(trajectories_xy - anc, axis=-1), axis=-1)
+	                                for anc in anchors])
+
+	anchor_closest = np.argmin(anchor_dists, axis=-1)
+
+	num_anchors = anchors.shape[0]
+	freq = [np.sum(anchor_closest == ind_anc) for ind_anc in range(num_anchors)]
+	weights = np.sum(freq) / freq
+	weights /= np.max(weights)
+
+	plt.subplot(211)
+	plt.bar( np.arange(num_anchors), freq)
+	plt.subplot(212)
+	plt.bar(np.arange(num_anchors), weights)
+	plt.show()
+
+	return weights
+
+
+
 if __name__ == '__main__':
+	
 	save_clusters = False
+	save_weights  = True
 
 	datadir = os.path.abspath(__file__).split('scripts')[0] + 'data'
 	train_set = glob.glob(datadir + '/nuscenes_train*.record')
@@ -167,10 +238,19 @@ if __name__ == '__main__':
 	trajectory_dataset = load_trajectory_dataset(train_set)
 	#plot_trajectory_dataset(trajectory_dataset)
 	#identify_clusters_length_curvature(trajectory_dataset, n_clusters=16)
-	cluster_trajs = identify_clusters(trajectory_dataset, n_clusters=32)
+	#cluster_trajs = identify_clusters(trajectory_dataset, n_clusters=32)
+	#resample_length_curvature(trajectory_dataset)
 
 	if save_clusters:
 		np.save( datadir + '/nuscenes_clusters_16.npy', cluster_trajs)
+
+	anchors = np.load( datadir + '/nuscenes_clusters_16.npy')
+
+	weights = get_anchor_weights(anchors, trajectory_dataset)
+
+	if save_weights:
+		print(weights)
+		np.save( datadir + '/nuscenes_clusters_16_weights.npy', weights)
 
 
 	
