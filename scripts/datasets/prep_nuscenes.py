@@ -2,6 +2,7 @@ import os
 import numpy as np
 from pyquaternion import Quaternion
 from functools import partial
+import argparse
 
 from nuscenes.nuscenes import NuScenes
 from nuscenes.prediction import PredictHelper
@@ -45,10 +46,22 @@ def get_data_dict(input_representation, # an InputRepresentation object to do im
 	yaw_rate     = helper.get_heading_change_rate_for_agent(instance, sample)
 
 	# Get pose history/future.  False/False used to get raw annotations rather than local xy coords.
-	past_poses   = \
-	  extract_poses( helper.get_past_for_agent(instance, sample, past_secs, False, False) ) 			           
-	future_poses = \
-	  extract_poses( helper.get_future_for_agent(instance, sample, future_secs, False, False) )
+	past   = helper.get_past_for_agent(instance, sample, past_secs, False, False)
+	future = helper.get_future_for_agent(instance, sample, future_secs, False, False)
+	past_poses   = extract_poses(past) 			           
+	future_poses = extract_poses(future)
+
+	# Get the relative time difference (seconds) from the current sample time.
+	# This is required since nuscenes does not have a constant sampling time (i.e. can be 0.4 - 0.6 s).
+	current_tm = helper._timestamp_for_sample(sample)
+
+	past_tms   = [helper._timestamp_for_sample(p['sample_token']) for p in past]
+
+	future_tms = [helper._timestamp_for_sample(f['sample_token']) for f in future]
+
+	# Microseconds -> seconds.
+	past_tms   = np.array([10**(-6) * (x - current_tm)  for x in past_tms])
+	future_tms = np.array([10**(-6) * (x - current_tm)  for x in future_tms])
 
 	# Return None if we have an invalid data entry.
 	if np.isnan(vel) or np.isnan(accel) or np.isnan(yaw_rate):
@@ -79,19 +92,28 @@ def get_data_dict(input_representation, # an InputRepresentation object to do im
 	        'yaw_rate': yaw_rate,
 	        'past_poses_local': past_local_poses,
 	        'future_poses_local': future_local_poses,
+	        'past_tms': past_tms,
+	        'future_tms': future_tms,
 	        'image': img}
 
 if __name__ == '__main__':	
-	mode = 'write'
+	parser = argparse.ArgumentParser('Read/Write NuScenes prediction instances in TFRecord format.')
+	parser.add_argument('--mode', choices=['write', 'read'], type=str, required=True, help='Write or read TFRecords.')
+	parser.add_argument('--datadir', type=str, help='Where the TFRecords are located or should be saved.', \
+		                    default=os.path.abspath(__file__).split('scripts')[0] + 'data')
+	parser.add_argument('--dataroot', type=str, help='Location of the NuScenes dataset.', \
+		                    default='/media/data/nuscenes-data/')
+	args = parser.parse_args()
+	datadir = args.datadir
+	mode = args.mode
+	dataroot = args.dataroot
 
-	datadir = os.path.abspath(__file__).split('scripts')[0] + 'data'	
 	if not os.path.exists(datadir):
 		raise Exception("Data directory does not exist: {}".format(datadir))
 	print('Saving to: {}'.format(datadir))
 
-	if mode == 'write':
-		DATAROOT = '/media/data/nuscenes-data/' # location of NuScenes dataset
-		nusc = NuScenes('v1.0-trainval', dataroot=DATAROOT) # 850 scenes, 700 train and 150 val
+	if mode == 'write':		
+		nusc = NuScenes('v1.0-trainval', dataroot=dataroot) # 850 scenes, 700 train and 150 val
 		helper = PredictHelper(nusc)
 
 		PAST_SECS   = 1.0
@@ -107,7 +129,7 @@ if __name__ == '__main__':
 			                         past_secs=PAST_SECS, future_secs=FUTURE_SECS) 
 
 		for split in ['train_val', 'val', 'train']:
-			dataset    = get_prediction_challenge_split(split, dataroot=DATAROOT)     
+			dataset    = get_prediction_challenge_split(split, dataroot=dataroot)     
 			file_prefix = '{}/nuscenes_{}'.format(datadir, split)
 			write_tfrecord(file_prefix,         
 			               dataset,             
@@ -148,6 +170,9 @@ if __name__ == '__main__':
 			plt.subplot(211); plt.imshow(entry['image'][0])
 			plt.subplot(212); plt.imshow(entry['image'][1])
 			plt.draw(); plt.pause(0.01)
+
+			if batch_ind == 100:
+				break
 		
 		plt.ioff()
 		plt.show()

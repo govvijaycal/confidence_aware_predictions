@@ -1,6 +1,6 @@
 import tensorflow as tf
 import numpy as np
-from multiprocessing import Process
+from tqdm import tqdm
 
 ##############################
 # Standard TFRecord feature generation from https://www.tensorflow.org/tutorials/load_data/tfrecord.
@@ -50,7 +50,7 @@ def write_tfrecord(file_prefix,           # where to save the tfrecord without t
 		print('***Started writing to {} at dataset index {} of {}'.format(
 			   record_file, current_dataset_ind, num_elements))
 
-		for ind in range(max_per_record):			
+		for ind in tqdm(range(max_per_record)):			
 			data_dict = data_dict_function(dataset[current_dataset_ind])
 
 			if data_dict is not None and len(data_dict.keys()) > 0:
@@ -66,6 +66,9 @@ def write_tfrecord(file_prefix,           # where to save the tfrecord without t
 					ftr[key] = _bytes_feature_list( tf.io.serialize_tensor(data_dict[key].astype(np.float64)) )
 					ftr[key + '_shape'] = \
 					    _bytes_feature_list( np.array(data_dict[key].shape, np.int32).tobytes() ) 
+
+				for key in ['past_tms', 'future_tms']:
+					ftr[key] = _bytes_feature_list( tf.io.serialize_tensor(data_dict[key].astype(np.float64)) )
 
 				ftr['image']       = \
 				    _bytes_feature_list( data_dict['image'].tobytes() ) 
@@ -101,6 +104,8 @@ def _parse_function(proto):
 	       'pose_shape'               : tf.io.FixedLenFeature([], tf.string),
 	       'past_poses_local'         : tf.io.FixedLenFeature([], tf.string),
 	       'past_poses_local_shape'   : tf.io.FixedLenFeature([], tf.string),
+	       'past_tms'                 : tf.io.FixedLenFeature([], tf.string),
+	       'future_tms'               : tf.io.FixedLenFeature([], tf.string),
 	       'future_poses_local'       : tf.io.FixedLenFeature([], tf.string),
 	       'future_poses_local_shape' : tf.io.FixedLenFeature([], tf.string),
 	       'image'                    : tf.io.FixedLenFeature([], tf.string),
@@ -117,6 +122,8 @@ def _parse_function(proto):
 	for key in ['velocity', 'acceleration', 'yaw_rate']:
 		data_dict[key] = tf.reshape(tf.io.parse_tensor(parsed_features[key], out_type=tf.float64), (1,))
 
+	for key in ['future_tms', 'past_tms']:
+		data_dict[key] = tf.io.parse_tensor(parsed_features[key], out_type=tf.float64)
 
 	for key in ['pose', 'past_poses_local', 'future_poses_local']:
 		value   = tf.io.parse_tensor(parsed_features[key], out_type=tf.float64)
