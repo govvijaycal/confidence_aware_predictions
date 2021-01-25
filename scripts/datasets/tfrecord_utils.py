@@ -1,4 +1,5 @@
 import tensorflow as tf
+import tensorflow_addons as tfa
 import numpy as np
 from multiprocessing import Process
 
@@ -129,11 +130,30 @@ def _parse_function(proto):
 
 	return data_dict
 
+def _parse_aug_function(proto):
+	data_dict = _parse_function(proto)
+	mask_size = 50
+	rvs = tf.random.uniform(shape=[2])
 
+	if rvs[0] < 0.4:
+		data_dict['image'] = tfa.image.random_cutout(tf.expand_dims(data_dict['image'], 0), mask_size)[0]
 
+	if rvs[1] < 0.4:
+		vx  = data_dict['velocity']
+		wz  = data_dict['yaw_rate']
+		acc = data_dict['acceleration']
 
+		vtarget = vx + acc * tf.constant(0.1, dtype=tf.float64)
+		curv    = wz / tf.math.maximum(vx, tf.constant(1.0, dtype=tf.float64))
+		aug_range = tf.math.maximum(tf.constant(1.0, dtype=tf.float64), \
+			                        tf.math.abs(vx / tf.constant(5.0, dtype=tf.float64)))
 
+		vaug = tf.nn.relu(vx + aug_range*tf.random.uniform(shape=[1], dtype=tf.float64)[0])
+		aaug = (vtarget - vaug) / tf.constant(0.1, dtype=tf.float64)
+		waug = curv * vaug
 
+		data_dict['velocity']     = vaug
+		data_dict['yaw_rate']     = waug
+		data_dict['acceleration'] = aaug
 
-
-	
+	return data_dict
