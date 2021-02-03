@@ -14,7 +14,7 @@ from nuscenes.prediction.input_representation.static_layers import StaticLayerRa
 from nuscenes.prediction.input_representation.agents import AgentBoxesWithFadedHistory
 from nuscenes.prediction.input_representation.combinators import Rasterizer
 
-from tfrecord_utils import write_tfrecord, _parse_function
+from tfrecord_utils import write_tfrecord, _parse_function, _parse_aug_function
 from pose_utils import convert_global_to_local, convert_local_to_global, pose_diff_norm
 
 ##########################################
@@ -97,8 +97,9 @@ def get_data_dict(input_representation, # an InputRepresentation object to do im
 	        'image': img}
 
 if __name__ == '__main__':	
-	parser = argparse.ArgumentParser('Read/Write NuScenes prediction instances in TFRecord format.')
-	parser.add_argument('--mode', choices=['write', 'read'], type=str, required=True, help='Write or read TFRecords.')
+	parser = argparse.ArgumentParser('Read/write NuScenes prediction instances in TFRecord format.')
+	parser.add_argument('--mode', choices=['read', 'write', 'batch_test'], type=str, required=True, \
+		                    help='Read/write tfrecords or check batch shuffling.')
 	parser.add_argument('--datadir', type=str, help='Where the TFRecords are located or should be saved.', \
 		                    default=os.path.abspath(__file__).split('scripts')[0] + 'data')
 	parser.add_argument('--dataroot', type=str, help='Location of the NuScenes dataset.', \
@@ -144,7 +145,7 @@ if __name__ == '__main__':
 		plt.ion()
 		
 		dataset = tf.data.TFRecordDataset(glob.glob(datadir + '/*.record'))
-		dataset = dataset.map(_parse_function)
+		dataset = dataset.map(_parse_function) # can see augmentations with _parse_aug_function.
 		dataset = dataset.batch(2)
 
 		f1 = plt.figure()
@@ -177,5 +178,47 @@ if __name__ == '__main__':
 		plt.ioff()
 		plt.show()
 
+	elif mode == 'batch_test':
+		import tensorflow as tf
+		import glob
+		
+		example_dict = {}
+		batch_size = 32
+		
+		train_set = glob.glob(datadir + '/nuscenes_train*.record')
+		train_set = [x for x in train_set if 'val' not in x]
+
+		files   = tf.data.Dataset.from_tensor_slices(train_set)
+		files   = files.shuffle(buffer_size=len(train_set), reshuffle_each_iteration=True) 
+		dataset = files.interleave(lambda x: tf.data.TFRecordDataset(x), 
+			                       cycle_length=2, block_length=16)
+		dataset = dataset.map(_parse_function)
+		dataset = dataset.shuffle(10*batch_size, reshuffle_each_iteration=True)
+		dataset = dataset.batch(batch_size)
+		dataset = dataset.prefetch(2)
+
+		for batch_ind, entry in enumerate(dataset):
+			instances  = [tf.compat.as_str(x) for x in entry['instance'].numpy()]
+			samples    = [tf.compat.as_str(x) for x in entry['sample'].numpy()]
+			entry_inds = (np.arange(batch_size) + batch_ind * batch_size).astype(np.int)
+
+			for eind, inst, samp in zip(entry_inds, samples, instances):
+				example_dict['{}_{}'.format(inst,samp)] = [eind]
+
+		for _ in range(5):
+			for batch_ind, entry in enumerate(dataset):
+				instances  = [tf.compat.as_str(x) for x in entry['instance'].numpy()]
+				samples    = [tf.compat.as_str(x) for x in entry['sample'].numpy()]
+				entry_inds = (np.arange(batch_size) + batch_ind * batch_size).astype(np.int)
+
+				for eind, inst, samp in zip(entry_inds, samples, instances):
+					example_dict['{}_{}'.format(inst,samp)].append( eind )
+
+		ranges = [np.amax(example_dict[k]) - np.amin(example_dict[k]) for k in example_dict.keys()]
+		stds   = [np.std(example_dict[k]) for k in example_dict.keys()]
+
+		print('Average batch index range and std dev: ', np.mean(ranges), np.mean(stds))
+		# 21560.175791733764 7769.009983279616
+		# This indicates the above pipeline is shuffling the data well.
 	else:
 		raise ValueError("Invalid mode: {}".format(mode))
