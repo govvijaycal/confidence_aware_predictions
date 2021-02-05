@@ -130,12 +130,18 @@ def stratified_sampling_length_curvature(torch_dataset, samples_per_part=8000, b
 	under_50 = lengths < 50	  # under 50 m long future trajectory
 	above_50 = lengths >= 50  # over 50 m ""
 
-	part1 = np.logical_and( under_50, np.abs(curvs) <= 0.05)
-	part2 = np.logical_and( under_50, curvs >= 0.05)
-	part3 = np.logical_and( under_50, curvs <= -0.05)
-	part4 = above_50
+	# 0.02 / 0.002 is approximately 1 std of curvature for that partition.
+	# For train/val set, min partition size is 27236/3365 (part6).
+	part1 = np.logical_and( under_50, np.abs(curvs) <= 0.02)
+	part2 = np.logical_and( under_50, curvs > 0.02)
+	part3 = np.logical_and( under_50, curvs < -0.02)
+	part4 = np.logical_and( above_50, np.abs(curvs) <= 0.002)
+	part5 = np.logical_and( above_50, curvs > 0.002)
+	part6 = np.logical_and( above_50, curvs < -0.002)
 
-	parts  = [part1, part2, part3, part4]
+	parts  = [part1, part2, part3, part4, part5, part6]
+	# Check every instance has been allocated a partition and only once (disjoint).
+	assert np.all( np.sum(np.array([p for p in parts]).astype(np.int), axis=0) == 1 ) 
 
 	selected = np.zeros( num_instances, dtype=np.bool )
 	np.random.seed(0)
@@ -144,10 +150,12 @@ def stratified_sampling_length_curvature(torch_dataset, samples_per_part=8000, b
 	# to make a balanced dataset across partitions.
 	# This will not address imbalance within the partition, however.
 	try:
-		for part in parts:
+		for ind_part, part in enumerate(parts):		
+			print(f"Partition {ind_part+1} has {np.sum(part)} elements.")	
 			samples = np.random.choice( np.ravel(np.argwhere(part > 0)), replace=False, size=samples_per_part)
 			selected[samples] = True
-	except:
+	except Exception as e:
+		print(e)
 		import pdb; pdb.set_trace() # will be triggered if samples_per_part is too high
 
 	return selected, lengths, curvs
@@ -214,7 +222,8 @@ def get_data_dict(torch_dataset,  # prefiltered/downsampled dataset that provide
 	        'past_tms': past_tms,
 	        'future_tms': future_tms,
 	        'image': img}
-	
+
+##########################################	
 if __name__ == '__main__':		
 	parser = argparse.ArgumentParser('Read/Write L5Kit prediction instances in TFRecord format.')
 	parser.add_argument('--mode', choices=['read', 'write', 'batch_test'], type=str, required=True, help='Write or read TFRecords.')
@@ -264,7 +273,7 @@ if __name__ == '__main__':
 			if not subset_mask_path.exists():
 				frame_selected_inds = np.nonzero(frames_mask)[0]
 				frame_subset = torch.utils.data.Subset(ego_dataset, frame_selected_inds)
-				samples_per_part = 8000 if split is 'train' else 1500
+				samples_per_part = 7500 if split is 'train' else 1500
 				subsample_mask, lengths, curvs = \
 				    stratified_sampling_length_curvature(frame_subset, samples_per_part=samples_per_part)
 				frames_mask[ frame_selected_inds ] = subsample_mask
