@@ -177,7 +177,7 @@ def _parse_aug_function(proto):
 
 ##############################
 # Utility function to read and visualize TFRecords.
-def visualize_tfrecords(tfrecord_files, max_batches=100):
+def visualize_tfrecords(tfrecord_files, max_batches=None):
 	plt.ion()
 
 	dataset = tf.data.TFRecordDataset(tfrecord_files)
@@ -186,6 +186,8 @@ def visualize_tfrecords(tfrecord_files, max_batches=100):
 
 	f1 = plt.figure()
 	f2 = plt.figure()
+	plt.subplot(211); im1 = plt.imshow(np.zeros((500, 500, 3), dtype=np.uint8))
+	plt.subplot(212); im2 = plt.imshow(np.zeros((500, 500, 3), dtype=np.uint8))
 
 	for batch_ind, entry in enumerate(dataset):
 		# This returns a dictionary which maps to a batch_size x data_shape tensor.
@@ -202,13 +204,11 @@ def visualize_tfrecords(tfrecord_files, max_batches=100):
 		plt.plot(entry['future_poses_local'][0][:,0], entry['future_poses_local'][0][:,1])
 		plt.plot(entry['future_poses_local'][1][:,0], entry['future_poses_local'][1][:,1])
 
-		plt.figure(f2.number); 
-		plt.clf()
-		plt.subplot(211); plt.imshow(entry['image'][0])
-		plt.subplot(212); plt.imshow(entry['image'][1])
+		im1.set_data( entry['image'][0] )
+		im2.set_data( entry['image'][1] )
 		plt.draw(); plt.pause(0.01)
 
-		if batch_ind == max_batches:
+		if max_batches is not None and batch_ind == max_batches:
 			break
 
 	plt.ioff()

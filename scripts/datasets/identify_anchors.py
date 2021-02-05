@@ -1,5 +1,6 @@
 import os
 import glob
+import argparse
 import numpy as np
 import matplotlib.pyplot as plt
 import tensorflow as tf
@@ -8,7 +9,15 @@ from sklearn.cluster import KMeans
 from tfrecord_utils import _parse_function
 from colorsys import hsv_to_rgb
 
+##########################################
+# Loading and visualizing a trajectory dataset.
 def load_trajectory_dataset(tfrecord_files, init_size=(30000, 12, 3)):
+	""" Given a set of tfrecords, assembles a np.array containing all future trajectories. """
+
+	# The size is M x N x 3, where:
+	# M = number of trajectories
+	# N = number of timesteps in a trajectory
+	# 3 = state dim, [x, y, yaw] in a local frame s.t. state = [0,0,0] at current timestep
 	trajectory_dataset = np.ones(init_size) * np.nan
 
 	dataset = tf.data.TFRecordDataset(tfrecord_files)
@@ -21,20 +30,38 @@ def load_trajectory_dataset(tfrecord_files, init_size=(30000, 12, 3)):
 	return trajectory_dataset[:num_elements, :, :]
 
 def plot_trajectory_dataset(trajectory_dataset):
+	""" Given a trajectory dataset (np.array),plots all future trajectories. """
 	num_elements = trajectory_dataset.shape[0]
+
+	plt.figure()
 	for ind in range(num_elements):
 		plt.plot(trajectory_dataset[ind, :, 0], trajectory_dataset[ind, :, 1])
 	plt.title('{} Trajectories'.format(num_elements))
 	plt.xlabel('X (m)')
 	plt.ylabel('Y (m)')
+	
 	plt.show()
 
-def length_curv_to_trajectories(length_curv_list, num_timesteps=12):
+def compute_length_curvature(trajectory_dataset):
+	# Approximate curvature just with endpoints yaw difference / length for simplicity.
+	length = np.linalg.norm(trajectory_dataset[:,0, :2], axis=-1) +  \
+	         np.sum( np.linalg.norm(trajectory_dataset[:,1:,:2] - trajectory_dataset[:,:-1,:2], 
+		                            axis=-1), axis=-1)
+	curv   = trajectory_dataset[:, -1, 2] / length
+
+	return length, curv
+
+##########################################
+# Utils/prototyping to try out various ideas based on length /curvature.
+# Unused as of now.
+def constant_length_curv_to_trajectories(length_curv_list, num_timesteps=12):
+	""" Convert a constant length and curvature description to a trajectory based on
+	    numerical integration of ODE below.
+	"""
 	trajectories = []
 	for length_curv in length_curv_list:
-		length, curv = length_curv
-		assert np.abs(curv) > 1e-6
-
+		length, curv = length_curv # curv/length are scalars
+		
 		# Integration of the following ODE:
 		# dx/ds = cos(theta(s))
 		# dy/ds = sin(theta(s))
@@ -42,63 +69,46 @@ def length_curv_to_trajectories(length_curv_list, num_timesteps=12):
 		# x(0) = y(0) = theta(0) = 0.
 		# assume constant "speed" and curvature to generate ss.
 		ss = np.linspace(0.0, length, num_timesteps)
-		xs = 1 / curv * np.sin(curv * np.array(ss))
-		ys = 1 / curv * ( 1 - np.cos(curv * np.array(ss)) )
+
+		if np.abs(curv) > 1e-6:
+			# Nonzero curvature
+			xs = 1 / curv * np.sin(curv * np.array(ss))
+			ys = 1 / curv * ( 1 - np.cos(curv * np.array(ss)) )
+		else:
+			# Zero curvature
+			xs = ss
+			ys = np.zeros_like(ss)
 
 		trajectories.append(np.column_stack((xs, ys)))	
 	return np.array(trajectories)
 
-def resample_length_curvature(trajectory_dataset):
-	# Approximate curvature just with endpoints yaw difference / length for simplicity.
-	length = np.sum( np.linalg.norm(trajectory_dataset[:,1:,:2] - trajectory_dataset[:,:-1,:2], 
-		                            axis=-1), axis=-1)
-	curv   = (trajectory_dataset[:, -1, 2] - trajectory_dataset[:, 0, 2]) / length
+def check_stratified_coverage(trajectory_dataset):	
+	""" Breaks down dataset into bins of length/curvature and sees the
+		distribution among these strata.  L5kit dataset is balanced
+		manually but nuscenes is taken as is without rebalancing.
+	"""
+	lengths, curvs = compute_length_curvature(trajectory_dataset)
 
-	# curv_mids   = np.arange(-0.0975, 0.1, 0.005)
-	# length_mids = np.arange(10., 90., 20.)
+	under_50 = lengths < 50	  # under 50 m long future trajectory
+	above_50 = lengths >= 50  # over 50 m ""
 
-	# curv_assignments   = np.argmin(np.column_stack([
-	# 	np.fabs(curv - mcurv) for mcurv in curv_mids]), axis=-1)
-	# length_assignments = np.argmin(np.column_stack([np.fabs(length - mlength) for mlength in length_mids]), axis=-1)
-	
-	# partitions = {}
+	# Strata used for l5kit.  For nuscenes, there was insufficient data
+	# to use this effectively but there is a heavy bias to short trajectories
+	# with low curvature (>50% straight with length < 50 m).
+	part1 = np.logical_and( under_50, np.abs(curvs) <= 0.02)
+	part2 = np.logical_and( under_50, curvs > 0.02)
+	part3 = np.logical_and( under_50, curvs < -0.02)
+	part4 = np.logical_and( above_50, np.abs(curvs) <= 0.002)
+	part5 = np.logical_and( above_50, curvs > 0.002)
+	part6 = np.logical_and( above_50, curvs < -0.002)
 
-	# for ind_curv, mcurv in enumerate(curv_mids):
-	# 	for ind_length, mlength in enumerate(length_mids):
-	# 		in_curv_bin = set([x for x in np.ravel(np.argwhere(curv_assignments == ind_curv))])
-	# 		in_length_bin = set([x for x in np.ravel(np.argwhere(length_assignments == ind_length))])
-	# 		in_bin = in_curv_bin.intersection(in_length_bin)
-	# 		partitions['{}_{}'.format(ind_curv, ind_length)] = in_bin
+	for part in [part1, part2, part3, part4, part5, part6]:
+		print(f"Partition {ind_part+1} has {np.sum(part)} elements.")	
 
-	# num_valid_partitions = 0
-	# for key in partitions.keys():
-	# 	if len(partitions[key]) > 0:
-	# 		ind_curv, ind_length = [int(x) for x in key.split('_')]
-	# 		val_curv, val_length = curv_mids[ind_curv], length_mids[ind_length]
-	# 		print('{} curv, {} length: {} entries'.format(val_curv, val_length, len(partitions[key])))
-	# 		num_valid_partitions += 1
-	# print('{} valid of {} total partitions'.format(num_valid_partitions, len(partitions.keys())) ) 
-
-	stationary_indices = np.argwhere( length < 4.)
-	slow_indices       = np.argwhere( np.logical_and(length >= 4., length < 8.) )
-	straight_indices   = np.argwhere( np.logical_and(length >= 8., np.abs(curv * length) < np.radians(5.)) )
-	sleft_indices   = np.argwhere( np.logical_and(length >= 8., 
-		                                          np.logical_and(curv * length >= np.radians(5.), curv * length < np.radians(30)) 
-		                                          ))
-	sright_indices   = np.argwhere( np.logical_and(length >= 8., 
-		                                          np.logical_and(curv * length <= np.radians(-5.), curv * length > np.radians(-30)) 
-		                                          ))
-	left_indices = np.argwhere( np.logical_and(length >= 8., curv * length >= np.radians(30.)) )
-	right_indices = np.argwhere( np.logical_and(length >= 8., curv * length <= np.radians(-30.)) )
-	import pdb;
-	pdb.set_trace()
-
-
+##########################################
 def identify_clusters_length_curvature(trajectory_dataset, n_clusters=16):
-	# Approximate curvature just with endpoints yaw difference / length for simplicity.
-	length = np.sum( np.linalg.norm(trajectory_dataset[:,1:,:2] - trajectory_dataset[:,:-1,:2], 
-		                            axis=-1), axis=-1)
-	curv   = (trajectory_dataset[:, -1, 2] - trajectory_dataset[:, 0, 2]) / length
+	""" KMeans performed in length vs. curvature space """
+	length, curv = compute_length_curvature(trajectory_dataset)
 
 	# Partition by length into four equally long bins.
 	part_1 = np.argwhere( length < 25. )
@@ -155,13 +165,15 @@ def identify_clusters(trajectory_dataset, n_clusters=16):
 		                      init='k-means++',
 		                      verbose=1)
 
+	length, curv = compute_length_curvature(trajectory_dataset)
+	trajectories_xy = trajectory_dataset[:,:,:2]
 	# We fit clusters without theta, as the euclidean distance metric makes sense only with XY.
-	kmeans.fit(trajectory_dataset[:,:,:2]) 
+	kmeans.fit(trajectories_xy) 
 
 	# Silhouette score used to determine clustering performance (closer to +1 preferred).
 	# With this approach, getting scores around 0.3, which is better than the length/curv approach.
 	print('Silhouette Score: {}'.format( \
-		  silhouette_score(trajectory_dataset[:,:,:2], kmeans.labels_, metric='euclidean')))
+		  silhouette_score(trajectories_xy, kmeans.labels_, metric='euclidean')))
 	
 	# Plot all the trajectories in black and then the clusters
 	# using colors chosen by partitioning the hue in HSV space.
@@ -181,9 +193,7 @@ def identify_clusters(trajectory_dataset, n_clusters=16):
 	# and then show how the clusters were allocated to each partition.
 	# We are not manually specifying the number of cluster per partition with KMeans above.
 	plt.figure()
-	length = np.sum( np.linalg.norm(trajectory_dataset[:,1:,:2] - trajectory_dataset[:,:-1,:2], 
-		                            axis=-1), axis=-1)
-	curv   = (trajectory_dataset[:, -1, 2] - trajectory_dataset[:, 0, 2]) / length
+	
 	part_1 = np.argwhere( length < 25. )
 	part_2 = np.argwhere( np.logical_and( length >= 25.,  length < 50.) )
 	part_3 = np.argwhere( np.logical_and( length >= 50.,  length < 75.) )
@@ -193,10 +203,11 @@ def identify_clusters(trajectory_dataset, n_clusters=16):
 	plt.scatter(length[part_3], curv[part_3], color='b')
 	plt.scatter(length[part_4], curv[part_4], color='c')
 
-	length_cluster = np.sum( np.linalg.norm(traj_clusters[:,1:,:2] - traj_clusters[:,:-1,:2], 
+	length_cluster = np.sum( traj_clusters[:,0,:2], axis=-1 ) + \
+	                 np.sum( np.linalg.norm(traj_clusters[:,1:,:2] - traj_clusters[:,:-1,:2], 
 		                            axis=-1), axis=-1)
 	xy_diff_end = traj_clusters[:,-1,:] - traj_clusters[:,-2,:]
-	heading_end = np.arctan( xy_diff_end[:,1] / xy_diff_end[:,0] )
+	heading_end = np.arctan2( xy_diff_end[:,1] , xy_diff_end[:,0] )
 	curv_cluster = heading_end / length_cluster
 	plt.scatter(length_cluster, curv_cluster, color='k')
 	plt.show()		
@@ -204,6 +215,10 @@ def identify_clusters(trajectory_dataset, n_clusters=16):
 	return traj_clusters
 
 def get_anchor_weights(anchors, trajectory_dataset):
+	""" Given identified anchors and a trajectory dataset, finds anchor classification weights 
+	    to address unbalanced datasets with some rare classes. 
+	"""
+	# Identify the classification labels (anchor id) for each trajectory.
 	trajectories_xy = trajectory_dataset[:, :, :2]
 
 	anchor_dists = np.column_stack([np.sum(np.linalg.norm(trajectories_xy - anc, axis=-1), axis=-1)
@@ -211,58 +226,65 @@ def get_anchor_weights(anchors, trajectory_dataset):
 
 	anchor_closest = np.argmin(anchor_dists, axis=-1)
 
+	# Determine the frequency of each class/anchor and compute weights to emphasize
+	# the less frequent classes.  Roughly, this is inversely proportional to the relative
+	# frequency of that anchor.
 	num_anchors = anchors.shape[0]
-	freq = [np.sum(anchor_closest == ind_anc) for ind_anc in range(num_anchors)]
+	freq = [np.sum(anchor_closest == ind_anc) for ind_anc in range(num_anchors)] 
 	weights = np.sum(freq) / freq
 	weights /= np.max(weights)
 
+	# Visualize results.
 	plt.subplot(211)
 	plt.bar( np.arange(num_anchors), freq)
+	plt.ylabel('Frequency')
 	plt.subplot(212)
 	plt.bar(np.arange(num_anchors), weights)
+	plt.ylabel('Weight')
+	plt.suptitle('Anchor Weighting by Inverse Frequency')
 	plt.show()
 
 	return weights
 
-
-
+##########################################
 if __name__ == '__main__':
+	parser = argparse.ArgumentParser('Analyze trajectories in TFRecord and determine clusters using time-series k-means.')
+	parser.add_argument('--mode', choices=['visualize', 'cluster'], type=str, required=True, help='What task to perform: visualizing or clustering trajectories.')
+	parser.add_argument('--dataset', choices=['l5kit', 'nuscenes'], type=str, required=True, help='Which TFRecord dataset to analyze.')
+	parser.add_argument('--n_clusters', type=int, default=16, help='Number of k-means clusters if using cluster mode.')
+	parser.add_argument('--datadir', type=str, help='Where to load datasets and save results..', \
+		                    default=os.path.abspath(__file__).split('scripts')[0] + 'data')
+	args = parser.parse_args()
+	mode = args.mode
+	dataset = args.dataset
+	n_clusters = args.n_clusters
+	datadir = args.datadir
 	
-	save_clusters = False
-	save_weights  = True
+	if dataset == 'nuscenes':
+		train_set = glob.glob(datadir + '/nuscenes_train*.record')
+		train_set = [x for x in train_set if 'val' not in x]
+		init_size = (32000, 12, 3)
+	elif dataset == 'l5kit':
+		train_set = glob.glob(datadir + '/l5kit_train*.record')	
+		init_size = (32000, 25, 3)
+	else:
+		raise ValueError(f"Dataset {dataset} not supported.")
 
-	datadir = os.path.abspath(__file__).split('scripts')[0] + 'data'
-	train_set = glob.glob(datadir + '/nuscenes_train*.record')
-	train_set = [x for x in train_set if 'val' not in x]	
+	trajectory_dataset = load_trajectory_dataset(train_set, init_size=init_size)	
 
-	trajectory_dataset = load_trajectory_dataset(train_set)
-	#plot_trajectory_dataset(trajectory_dataset)
-	#identify_clusters_length_curvature(trajectory_dataset, n_clusters=16)
-	#cluster_trajs = identify_clusters(trajectory_dataset, n_clusters=32)
-	#resample_length_curvature(trajectory_dataset)
+	if mode == 'visualize':
+		plot_trajectory_dataset(trajectory_dataset)
+	elif mode == 'cluster':		
+		cluster_trajs = identify_clusters(trajectory_dataset, n_clusters=n_clusters)
 
-	if save_clusters:
-		np.save( datadir + '/nuscenes_clusters_16.npy', cluster_trajs)
+		weights = get_anchor_weights(anchors, trajectory_dataset)
+		print("Anchor ID: Weight")
+		[print(w_id, w) for (w_id, w) in zip(range(n_clusters), weights)]
 
-	anchors = np.load( datadir + '/nuscenes_clusters_16.npy')
-
-	weights = get_anchor_weights(anchors, trajectory_dataset)
-
-	if save_weights:
-		print(weights)
-		np.save( datadir + '/nuscenes_clusters_16_weights.npy', weights)
-
-
-	
-
-	
-
-	
-	
-
-	
-	
-
-	
-
-
+		np.save( f"{datadir}/{dataset}_clusters_{n_clusters}.npy", cluster_trajs)	
+		np.save( f"{datadir}/{dataset}_clusters_{n_clusters}_weights.npy", weights)
+	else:
+		# Unused but useful util functions (maybe add more modes if needed):
+		# identify_clusters_length_curvature, check_stratified_coverage, 
+		# constant_length_curv_to_trajectories
+		raise ValueError(f"Mode {mode} not valid.")
