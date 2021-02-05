@@ -2,6 +2,7 @@ import tensorflow as tf
 import tensorflow_addons as tfa
 import numpy as np
 from tqdm import tqdm
+import matplotlib.pyplot as plt
 
 ##############################
 # Standard TFRecord feature generation from https://www.tensorflow.org/tutorials/load_data/tfrecord.
@@ -94,6 +95,8 @@ def write_tfrecord(file_prefix,           # where to save the tfrecord without t
 	print('Finished writing: {} splits, {} entries written out of {}'.format(
 		   current_split, total_entries_written, num_elements))
 
+##############################
+# Parse a single TFRecord instance without augmentation.
 def _parse_function(proto):
 	ftr = {'instance'                 : tf.io.FixedLenFeature([], tf.string),
 	       'sample'                   : tf.io.FixedLenFeature([], tf.string),
@@ -137,6 +140,8 @@ def _parse_function(proto):
 
 	return data_dict
 
+##############################
+# Parse a single TFRecord instance with augmentation (for training).
 def _parse_aug_function(proto):
 	data_dict = _parse_function(proto)
 	mask_size = 50
@@ -147,20 +152,104 @@ def _parse_aug_function(proto):
 
 	if rvs[1] < 0.4:
 		vx  = data_dict['velocity']
-		wz  = data_dict['yaw_rate']
-		acc = data_dict['acceleration']
+		vaug = vx + \
+		       tf.random.uniform(shape=[1], minval=-0.1, maxval=0.1, dtype=tf.float64)[0]
+		data_dict['velocity'] = vaug
+		
+		# For simplicity, we will only make small perturbations to the initial velocity.
+		# The acceleration and yaw rate are related to this initial velocity and the
+		# perturbations can have a large impact on the augmented accel/yaw rate.
+		# Ignoring those effects but leaving code for reference.
 
-		vtarget = vx + acc * tf.constant(0.1, dtype=tf.float64)
-		curv    = wz / tf.math.maximum(vx, tf.constant(1.0, dtype=tf.float64))
-		aug_range = tf.math.maximum(tf.constant(1.0, dtype=tf.float64), \
-			                        tf.math.abs(vx / tf.constant(5.0, dtype=tf.float64)))
-
-		vaug = tf.nn.relu(vx + aug_range*tf.random.uniform(shape=[1], dtype=tf.float64)[0])
-		aaug = (vtarget - vaug) / tf.constant(0.1, dtype=tf.float64)
-		waug = curv * vaug
-
-		data_dict['velocity']     = vaug
-		data_dict['yaw_rate']     = waug
-		data_dict['acceleration'] = aaug
+		# wz  = data_dict['yaw_rate']
+		# acc = data_dict['acceleration']
+		# vtarget = vx + acc * tf.constant(0.1, dtype=tf.float64)
+		# curv    = wz / tf.math.maximum(vx, tf.constant(1.0, dtype=tf.float64))
+		# aug_range = tf.math.maximum(tf.constant(1.0, dtype=tf.float64), \
+		# 	                        tf.math.abs(vx / tf.constant(5.0, dtype=tf.float64)))
+		# vaug = tf.nn.relu(vx + aug_range*tf.random.uniform(shape=[1], dtype=tf.float64)[0])
+		# aaug = (vtarget - vaug) / tf.constant(0.1, dtype=tf.float64)
+		# waug = curv * vaug
+		# data_dict['yaw_rate']     = waug
+		# data_dict['acceleration'] = aaug
 
 	return data_dict
+
+##############################
+# Utility function to read and visualize TFRecords.
+def visualize_tfrecords(tfrecord_files, max_batches=100):
+	plt.ion()
+
+	dataset = tf.data.TFRecordDataset(tfrecord_files)
+	dataset = dataset.map(_parse_function) # can see augmentations with _parse_aug_function.
+	dataset = dataset.batch(2)
+
+	f1 = plt.figure()
+	f2 = plt.figure()
+
+	for batch_ind, entry in enumerate(dataset):
+		# This returns a dictionary which maps to a batch_size x data_shape tensor.
+		
+		if batch_ind == 0:
+			for key in entry.keys():
+				if 'image' in key:
+					pass
+				else:
+					print(key, entry[key])
+					print()
+
+		plt.figure(f1.number)
+		plt.plot(entry['future_poses_local'][0][:,0], entry['future_poses_local'][0][:,1])
+		plt.plot(entry['future_poses_local'][1][:,0], entry['future_poses_local'][1][:,1])
+
+		plt.figure(f2.number); 
+		plt.clf()
+		plt.subplot(211); plt.imshow(entry['image'][0])
+		plt.subplot(212); plt.imshow(entry['image'][1])
+		plt.draw(); plt.pause(0.01)
+
+		if batch_ind == max_batches:
+			break
+
+	plt.ioff()
+	plt.show()
+
+##############################
+# Utility function to test dataset shuffling pipeline.
+def shuffle_test(tfrecord_files, batch_size=32):
+	example_dict = {}
+	
+	files   = tf.data.Dataset.from_tensor_slices(tfrecord_files)
+	files   = files.shuffle(buffer_size=len(tfrecord_files), reshuffle_each_iteration=True) 
+	dataset = files.interleave(lambda x: tf.data.TFRecordDataset(x), 
+		                       cycle_length=2, block_length=16)
+	dataset = dataset.map(_parse_function)
+	dataset = dataset.shuffle(10*batch_size, reshuffle_each_iteration=True)
+	dataset = dataset.batch(batch_size)
+	dataset = dataset.prefetch(2)
+
+	# First epoch: populate dictionary with unique element ids.
+	for batch_ind, entry in enumerate(dataset):
+		instances  = [tf.compat.as_str(x) for x in entry['instance'].numpy()]
+		samples    = [tf.compat.as_str(x) for x in entry['sample'].numpy()]
+		entry_inds = (np.arange(batch_size) + batch_ind * batch_size).astype(np.int)
+
+		for eind, inst, samp in zip(entry_inds, samples, instances):
+			example_dict[f"{inst}_{samp}"] = [eind]
+
+	# Later epochs: Determine element order in each epoch to check randomness of shuffling.
+	for epoch in range(5):
+		print(f"Epoch {epoch}")
+		for batch_ind, entry in tqdm(enumerate(dataset)):
+			instances  = [tf.compat.as_str(x) for x in entry['instance'].numpy()]
+			samples    = [tf.compat.as_str(x) for x in entry['sample'].numpy()]
+			entry_inds = (np.arange(batch_size) + batch_ind * batch_size).astype(np.int)
+
+			for eind, inst, samp in zip(entry_inds, samples, instances):
+				example_dict[f"{inst}_{samp}"].append( eind )
+
+	ranges = [np.amax(example_dict[k]) - np.amin(example_dict[k]) for k in example_dict.keys()]
+	stds   = [np.std(example_dict[k]) for k in example_dict.keys()]
+
+	for metric_fn, metric in zip([np.amin, np.amax, np.mean], ['min', 'max', 'mean']):
+		print(f"Shuffle {metric} range and std dev: {metric_fn(ranges)}, {metric_fn(stds)}")

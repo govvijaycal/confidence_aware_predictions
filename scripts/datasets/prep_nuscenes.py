@@ -1,4 +1,5 @@
 import os
+import glob
 import numpy as np
 from pyquaternion import Quaternion
 from functools import partial
@@ -14,7 +15,7 @@ from nuscenes.prediction.input_representation.static_layers import StaticLayerRa
 from nuscenes.prediction.input_representation.agents import AgentBoxesWithFadedHistory
 from nuscenes.prediction.input_representation.combinators import Rasterizer
 
-from tfrecord_utils import write_tfrecord, _parse_function, _parse_aug_function
+from tfrecord_utils import write_tfrecord, visualize_tfrecords, shuffle_test
 from pose_utils import convert_global_to_local, convert_local_to_global, pose_diff_norm
 
 ##########################################
@@ -139,86 +140,20 @@ if __name__ == '__main__':
 			               shuffle_seed = 0,    
 			               max_per_record = 1000)
 	elif mode == 'read':
-		import tensorflow as tf
-		import glob
-		import matplotlib.pyplot as plt
-		plt.ion()
-		
-		dataset = tf.data.TFRecordDataset(glob.glob(datadir + '/*.record'))
-		dataset = dataset.map(_parse_function) # can see augmentations with _parse_aug_function.
-		dataset = dataset.batch(2)
-
-		f1 = plt.figure()
-		f2 = plt.figure()
-
-		for batch_ind, entry in enumerate(dataset):
-			# This returns a dictionary which maps to a batch_size x data_shape tensor.
-			
-			if batch_ind == 0:
-				for key in entry.keys():
-					if 'image' in key:
-						pass
-					else:
-						print(key, entry[key])
-						print()
-
-			plt.figure(f1.number)
-			plt.plot(entry['future_poses_local'][0][:,0], entry['future_poses_local'][0][:,1])
-			plt.plot(entry['future_poses_local'][1][:,0], entry['future_poses_local'][1][:,1])
-
-			plt.figure(f2.number); 
-			plt.clf()
-			plt.subplot(211); plt.imshow(entry['image'][0])
-			plt.subplot(212); plt.imshow(entry['image'][1])
-			plt.draw(); plt.pause(0.01)
-
-			if batch_ind == 100:
-				break
-		
-		plt.ioff()
-		plt.show()
-
-	elif mode == 'batch_test':
-		import tensorflow as tf
-		import glob
-		
-		example_dict = {}
-		batch_size = 32
-		
 		train_set = glob.glob(datadir + '/nuscenes_train*.record')
 		train_set = [x for x in train_set if 'val' not in x]
+		visualize_tfrecords(train_set, max_batches=100)
 
-		files   = tf.data.Dataset.from_tensor_slices(train_set)
-		files   = files.shuffle(buffer_size=len(train_set), reshuffle_each_iteration=True) 
-		dataset = files.interleave(lambda x: tf.data.TFRecordDataset(x), 
-			                       cycle_length=2, block_length=16)
-		dataset = dataset.map(_parse_function)
-		dataset = dataset.shuffle(10*batch_size, reshuffle_each_iteration=True)
-		dataset = dataset.batch(batch_size)
-		dataset = dataset.prefetch(2)
+	elif mode == 'batch_test':
+		train_set = glob.glob(datadir + '/nuscenes_train*.record')
+		train_set = [x for x in train_set if 'val' not in x]
+		shuffle_test(train_set, batch_size=32)
 
-		for batch_ind, entry in enumerate(dataset):
-			instances  = [tf.compat.as_str(x) for x in entry['instance'].numpy()]
-			samples    = [tf.compat.as_str(x) for x in entry['sample'].numpy()]
-			entry_inds = (np.arange(batch_size) + batch_ind * batch_size).astype(np.int)
+		# Results: shows good shuffling (dataset size approx. 32000)
+		# Shuffle min range and std dev: 9375, 3678.020500969993
+		# Shuffle max range and std dev: 29670, 11924.862244720294
+		# Shuffle mean range and std dev: 21017.645061728395, 7663.28797797656
 
-			for eind, inst, samp in zip(entry_inds, samples, instances):
-				example_dict['{}_{}'.format(inst,samp)] = [eind]
 
-		for _ in range(5):
-			for batch_ind, entry in enumerate(dataset):
-				instances  = [tf.compat.as_str(x) for x in entry['instance'].numpy()]
-				samples    = [tf.compat.as_str(x) for x in entry['sample'].numpy()]
-				entry_inds = (np.arange(batch_size) + batch_ind * batch_size).astype(np.int)
-
-				for eind, inst, samp in zip(entry_inds, samples, instances):
-					example_dict['{}_{}'.format(inst,samp)].append( eind )
-
-		ranges = [np.amax(example_dict[k]) - np.amin(example_dict[k]) for k in example_dict.keys()]
-		stds   = [np.std(example_dict[k]) for k in example_dict.keys()]
-
-		print('Average batch index range and std dev: ', np.mean(ranges), np.mean(stds))
-		# 21560.175791733764 7769.009983279616
-		# This indicates the above pipeline is shuffling the data well.
 	else:
 		raise ValueError("Invalid mode: {}".format(mode))
