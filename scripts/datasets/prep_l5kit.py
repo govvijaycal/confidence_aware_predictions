@@ -1,4 +1,5 @@
 import os
+import glob
 import numpy as np
 import argparse
 from tqdm import tqdm
@@ -6,6 +7,7 @@ from functools import partial
 from zarr import convenience 
 from prettytable import PrettyTable
 from pathlib import Path
+import matplotlib.pyplot as plt
 
 import torch
 from torch.utils.data import DataLoader
@@ -22,8 +24,22 @@ from l5kit.geometry import transform_points
 from l5kit.visualization import PREDICTED_POINTS_COLOR, TARGET_POINTS_COLOR, draw_trajectory
 from l5kit.data import PERCEPTION_LABELS
 
-def downsample_agents(zarr_dataset, frame_skip_interval = 10):
+from tfrecord_utils import write_tfrecord, visualize_tfrecords, shuffle_test
+##########################################
+# Utils below for downsampling full l5kit dataset to a final set for TFRecord generation.
+MIN_EGO_TRAJ_LENGTH = 5.0 # m, could add this to config file if desired.
 
+def downsample_zarr_agents(zarr_dataset, frame_skip_interval = 10):
+	""" Given a zarr dataset, downsamples frames by frame_skip_interval
+	    in each scene and returns a mask with agents contained in
+	    the downsampled frames.  E.g. frame_skip_interval=10 roughly
+	    results in 1/10 of the agents being selected.
+
+	    NOTE: This function was not used finally, since non-ego agent data was
+	    not found to be reliable.  Extent can vary and positions can jump, resulting
+	    in bad velocity estimates.  I think this is since the l5kit agent data
+	    is raw perception output and not from annotations.
+	"""
 	agents_mask = np.zeros( len(zarr_dataset.agents), dtype=np.bool )
 	frame_intervals = zarr_dataset.scenes['frame_index_interval']
 	agent_intervals = zarr_dataset.frames['agent_index_interval']
@@ -38,10 +54,16 @@ def downsample_agents(zarr_dataset, frame_skip_interval = 10):
 
 	return agents_mask
 
-def downsample_frames(zarr_dataset, 
+def downsample_zarr_frames(zarr_dataset, 
 	                  frame_skip_interval = 10,
 	                  num_history_frames=10,
 	                  num_future_frames=50):
+	""" Given a zarr dataset, downsamples frames by frame_skip_interval
+	    in each scene and returns a mask with the selected frames.
+	    E.g. frame_skip_interval=10 reduces sampling frequency by about 1/10.
+	    num_history_frames and num_future_frames are used to avoid sampling
+	    partial trajectories (i.e. all history/future data should be "available" in l5kit terms).
+	"""
 	frames_mask = np.zeros( len(zarr_dataset.frames), dtype=np.bool )
 	frame_intervals = zarr_dataset.scenes['frame_index_interval']
 
@@ -50,10 +72,152 @@ def downsample_frames(zarr_dataset,
 			frames_mask[frame_selected] = True
 
 	return frames_mask
+
+def downsample_torch_length(torch_dataset, length_thresh=MIN_EGO_TRAJ_LENGTH, batch_size=64, num_workers=16):
+	""" Given a torch EgoDataset/AgentDataset, compute the trajectory length for every data
+		instance and return a mask for which ones exceed length_thresh.  This is slow-ish
+		(approx. 1 hour on train_full after it has been downsampled by 10x), so results should
+		be saved.  batch_size / num_workers used to speed up by using torch dataloader.
+	"""
+	dataloader = DataLoader(torch_dataset, 
+		                    batch_size = batch_size,
+		                    shuffle = False,
+		                    num_workers=num_workers)
+	num_instances = len(torch_dataset)
+	lengths_mask = np.zeros( num_instances, dtype=np.bool)
+
+	print(f'Computing the lengths mask - approx. {int(num_instances / batch_size)} iterations.')
+	for bs_ind, instances in tqdm(enumerate(dataloader)):
+		st_ind = bs_ind * batch_size
+		end_ind = min(num_instances, (bs_ind + 1) * batch_size)
+		diffs = instances['target_positions'][:, 1:, :] - instances['target_positions'][:, :-1, :]
+		length = torch.sum(torch.norm(diffs, dim=2), dim=1) + torch.norm(instances['target_positions'][:, 0, :], dim=1)
+		lengths_mask[st_ind:end_ind] = length.numpy() > length_thresh	
+	return lengths_mask	
+	
+def stratified_sampling_length_curvature(torch_dataset, samples_per_part=8000, batch_size=64, num_workers=16):
+	""" Given a torch EgoDataset/AgentDataset, compute the trajectory length and curvature for every data
+		instance.  Then try to get a balanced dataset by equally sampling from partitions defined below.
+		This tries to address overrepresentation of straight trajectorie and balance slow vs. fast speeds.
+	"""
+	dataloader = DataLoader(torch_dataset, batch_size = 64, shuffle = False, num_workers=16)
+	num_instances = len(torch_dataset)
+
+	lengths = np.ones( num_instances ) * np.nan
+	curvs   = np.ones( num_instances ) * np.nan
+	
+	print(f'Computing lengths/curvatures - approx. {int(num_instances / batch_size)} iterations.')
+	for bs_ind, instances in tqdm(enumerate(dataloader)):
+		st_ind = bs_ind * batch_size
+		end_ind = min( num_instances , (bs_ind + 1) * batch_size)
+		
+		# Length is taken by finding the cumulative Euclidean distance along the future trajectory.
+		# We add the norm of the first target position as well as it it 1 timestep from the current one.
+		diffs = instances['target_positions'][:, 1:, :] - instances['target_positions'][:, :-1, :]
+		length = torch.sum(torch.norm(diffs, dim=2), dim=1) + torch.norm(instances['target_positions'][:, 0, :], dim=1)
+
+		# Curvature crudely estimated by estimating as (final_yaw - 0) / length.
+		# We assume this dataset has been prefiltered to avoid very short length trajectories.
+		heading_final = torch.atan2(diffs[:, -1, 1], diffs[:, -1, 0])
+		curv = heading_final / length
+		
+		curvs[st_ind:end_ind]   = curv.numpy()
+		lengths[st_ind:end_ind] = length.numpy()
+
+	# Hard-coded partitions and sampling based on examining the data.
+	# Can make this more adaptive / user-friendly in the future.
+	# One issue is if samples_per_part exceeds the number of samples in that partition - see try/except block.
+	under_50 = lengths < 50	  # under 50 m long future trajectory
+	above_50 = lengths >= 50  # over 50 m ""
+
+	part1 = np.logical_and( under_50, np.abs(curvs) <= 0.05)
+	part2 = np.logical_and( under_50, curvs >= 0.05)
+	part3 = np.logical_and( under_50, curvs <= -0.05)
+	part4 = above_50
+
+	parts  = [part1, part2, part3, part4]
+
+	selected = np.zeros( num_instances, dtype=np.bool )
+	np.random.seed(0)
+
+	# Randomly sample samples_per_part in each partition
+	# to make a balanced dataset across partitions.
+	# This will not address imbalance within the partition, however.
+	try:
+		for part in parts:
+			samples = np.random.choice( np.ravel(np.argwhere(part > 0)), replace=False, size=samples_per_part)
+			selected[samples] = True
+	except:
+		import pdb; pdb.set_trace() # will be triggered if samples_per_part is too high
+
+	return selected, lengths, curvs
+
+##########################################
+FINAL_DT_TFRECORD = 0.2
+# Main function needed to extract a dictionary representation of a single element from a dataset.
+def get_data_dict(torch_dataset,  # prefiltered/downsampled dataset that provides l5kit dataset instances
+	              rasterizer,     # rasterizer to combine raw images from torch_dataset	              
+                  dataset_index): # index (int) for which we want to get a dataset dict to write.
+	if FINAL_DT_TFRECORD == 0.1:
+		frame_skip = 1 # 10 Hz
+	elif FINAL_DT_TFRECORD == 0.2:
+		frame_skip = 2 # 5 Hz
+	else:
+		raise NotImplementedError("Only handling 0.1 s (10Hz) or 0.2 s (5 Hz) at the moment.")
+
+
+	element = torch_dataset[dataset_index]
+	# Unused keys: host_id, timestamp, extent, history_extents, future_extents
+	#              *_velocities can be reconstructed using np.diff(..., axis=0) / 0.1
+	#			   raster_from_agent: straightforward given cfg params, just need to flip y-axis
+	#			   world_from_agent: similar functionality implemented in pose_utils.py
+	#              speed - dropped since it involves peeking into the future poses
+
+	# Sample in nuscenes terms = identifier for the timestamp in the dataset.
+	sample = f"scene_{element['scene_index']}_frame_{element['frame_index']}"
+
+	# Instance in nuscenes terms = identifier for the agent in that sample.
+	instance = f"track_{element['track_id']}"
+	if instance == f"track_{-1}":
+		agent_type = 'ego'
+	else:
+		raise NotImplementedError("Not set up yet for arbitrary AgentDataset instances.")
+
+	current_pose = np.append( element['centroid'], element['yaw'] )
+	assert np.all(element['target_availabilities'] == 1), "Invalid future frame detected!"
+	assert np.all(element['history_availabilities'] == 1), "Invalid past frame detected!"
+	
+	past_local_poses    = np.concatenate( (element['history_positions'], element['history_yaws']), axis=-1 )
+	past_local_poses    = past_local_poses[frame_skip::frame_skip, :] # sample every frame_skip frame without the current pose
+	future_local_poses  = np.concatenate( (element['target_positions'], element['target_yaws']), axis=-1 )
+	future_local_poses  = future_local_poses[(frame_skip-1)::frame_skip, :] # sample every frame skip frame
+	
+	vel = np.linalg.norm( past_local_poses[0, :2] ) / FINAL_DT_TFRECORD
+	vel_prev = np.linalg.norm( past_local_poses[1, :2] - past_local_poses[0, :2] ) / FINAL_DT_TFRECORD
+	yaw_rate = -past_local_poses[0, 2] / FINAL_DT_TFRECORD
+	accel = (vel - vel_prev) / FINAL_DT_TFRECORD
+
+	past_tms   = np.array( [-FINAL_DT_TFRECORD * x for x in range(1, len(past_local_poses)+1)] )
+	future_tms = np.array( [FINAL_DT_TFRECORD * x for x in range(1, len(future_local_poses)+1)] )
+
+	img = rasterizer.to_rgb( element['image'].transpose(1,2,0) )
+
+	return {'instance': instance,
+	        'sample': sample,
+	        'type': agent_type,
+	        'pose': current_pose,
+	        'velocity': vel,
+	        'acceleration': accel,
+	        'yaw_rate': yaw_rate,
+	        'past_poses_local': past_local_poses,
+	        'future_poses_local': future_local_poses,
+	        'past_tms': past_tms,
+	        'future_tms': future_tms,
+	        'image': img}
 	
 if __name__ == '__main__':		
 	parser = argparse.ArgumentParser('Read/Write L5Kit prediction instances in TFRecord format.')
-	parser.add_argument('--mode', choices=['write', 'read'], type=str, required=True, help='Write or read TFRecords.')
+	parser.add_argument('--mode', choices=['read', 'write', 'batch_test'], type=str, required=True, help='Write or read TFRecords.')
 	parser.add_argument('--datadir', type=str, help='Where the TFRecords are located or should be saved.', \
 		                    default=os.path.abspath(__file__).split('scripts')[0] + 'data')
 	parser.add_argument('--dataroot', type=str, help='Location of the L5Kit dataset.', \
@@ -63,100 +227,81 @@ if __name__ == '__main__':
 	mode = args.mode
 	dataroot = args.dataroot
 
-	dm = LocalDataManager(local_data_folder=dataroot)
+	if mode == "write":
+		dm = LocalDataManager(local_data_folder=dataroot)
 
-	cfg = load_config_data('/'.join( os.path.abspath(__file__).split('/')[:-1]) + \
-	                       '/l5kit_prediction_config.yaml')
+		cfg = load_config_data('/'.join( os.path.abspath(__file__).split('/')[:-1]) + \
+		                       '/l5kit_prediction_config.yaml')
+		frames_history    = cfg['model_params']['history_num_frames']
+		frames_future     = cfg['model_params']['future_num_frames']
+		rasterizer = build_rasterizer(cfg, dm)
 
-	agent_prob        = cfg['raster_params']['filter_agents_threshold']
-	frames_history    = cfg['model_params']['history_num_frames']
-	frames_future     = cfg['model_params']['future_num_frames']
+		for split in ['val', 'train']:
+			zarr = ChunkedDataset(dm.require(cfg[f'{split}_data_loader']['key'])).open()
+			ego_dataset = EgoDataset(cfg, zarr, None) # rasterizer not used to improve speed
 
-	filter_type       = cfg['agent_select_params']['filter_type']
-	th_speed          = cfg['agent_select_params']['speed_thresh']
+			# 1st downsampling
+			print(f"Dataset {split}: downsampling and removing trajectories " \
+				  f"with length < {MIN_EGO_TRAJ_LENGTH} m.")
+			frames_mask_path = Path( f"{datadir}/l5kit_{split}_ego_frames_mask.npy" )
+			if not frames_mask_path.exists():
+				frames_mask = downsample_zarr_frames(zarr,
+					                                 frame_skip_interval=10,
+					                                 num_history_frames=frames_history,
+					                                 num_future_frames=frames_future)
+				frame_ds_inds = np.nonzero(frames_mask)[0]
+				frame_subset = torch.utils.data.Subset(ego_dataset, frame_ds_inds)
+				lengths_mask = downsample_torch_length(frame_subset)	
+				frames_mask[ frame_ds_inds ] = lengths_mask
+				np.save(str(frames_mask_path), frames_mask)
+			else:
+				frames_mask = np.load(str(frames_mask_path))
 
-	rasterizer = build_rasterizer(cfg, dm)
+			# 2nd downsampling: perform "stratified sampling" to resample length/curvature
+			#                   distribution for reduced dataset imbalance.
+			print(f"Dataset {split}: performing stratified sampling over length and curvature.")
+			subset_mask_path = Path( f"{datadir}/l5kit_{split}_ego_frames_mask_subset.npy" )
+			if not subset_mask_path.exists():
+				frame_selected_inds = np.nonzero(frames_mask)[0]
+				frame_subset = torch.utils.data.Subset(ego_dataset, frame_selected_inds)
+				samples_per_part = 8000 if split is 'train' else 1500
+				subsample_mask, lengths, curvs = \
+				    stratified_sampling_length_curvature(frame_subset, samples_per_part=samples_per_part)
+				frames_mask[ frame_selected_inds ] = subsample_mask
+				subset_mask = frames_mask
+				
+				# We also save length / curvature to visualize stratified sampling selections later on.
+				np.save( str(subset_mask_path), subset_mask )
+				np.save( str(subset_mask_path).replace('subset', 'lengths'), lengths )
+				np.save( str(subset_mask_path).replace('subset', 'curvs'), curvs )
+			else:
+				subset_mask = np.load(str(subset_mask_path))
+			
+			final_ego_dataset = torch.utils.data.Subset(EgoDataset(cfg, zarr, rasterizer), np.nonzero(subset_mask)[0])
+			print(f"Dataset {split} has {len(final_ego_dataset)} instances out of {len(ego_dataset)}.")
+			del ego_dataset
 
-	train_zarr = ChunkedDataset(dm.require(cfg['train_data_loader']['key'])).open()
-	val_zarr   = ChunkedDataset(dm.require(cfg['val_data_loader']['key'])).open()
+			data_dict_function = partial(get_data_dict, final_ego_dataset, rasterizer) 
+			dataset_inds = np.arange(len(final_ego_dataset)).astype(np.int)
+			file_prefix = f"{datadir}/l5kit_{split}"
+			write_tfrecord(file_prefix,         
+			               dataset_inds,             
+			               data_dict_function,  
+			               shuffle = True,      
+			               shuffle_seed = 0,    
+			               max_per_record = 1000)
+	elif mode == 'read':
+		train_set = glob.glob(datadir + '/l5kit_train*.record')
+		visualize_tfrecords(train_set, max_batches=100)
 
-	rasterizer = None
-	train_dataset = EgoDataset(cfg, train_zarr, rasterizer)
-	frames_mask_path = Path( datadir + '/train_ego_frames_mask.npy' )
-	if not frames_mask_path.exists():
-		frames_mask = downsample_frames(train_zarr,
-		                                frame_skip_interval=10,
-		                                num_history_frames=frames_history,
-		                                num_future_frames=frames_future)
-		train_subset = torch.utils.data.Subset(train_dataset, np.nonzero(frames_mask)[0])
-		train_dataloader = DataLoader(train_subset, batch_size = 16, shuffle = False, num_workers=16)
-		lengths_mask = np.zeros( len(train_subset), dtype=np.bool)
+	elif mode == 'batch_test':
+		train_set = glob.glob(datadir + '/l5kit_train*.record')
+		shuffle_test(train_set, batch_size=32)
 
-		for bs_ind, instances in tqdm(enumerate(train_dataloader)):
-			st_ind = bs_ind * 16
-			end_ind = min(len(train_subset), (bs_ind + 1) * 16)
-			diffs = instances['target_positions'][:, 1:, :] - instances['target_positions'][:, :-1, :]
-			length = torch.sum(torch.norm(diffs, dim=2), dim=1) + torch.norm(instances['target_positions'][:, 0, :], dim=1)
-			lengths_mask[st_ind:end_ind] = length.numpy() > 5.0 # LENGTH_MIN		
-		frames_mask[ np.nonzero(frames_mask)[0] ] = lengths_mask
-		np.save(str(frames_mask_path), frames_mask)
+		# Results: shows good shuffling (dataset size 32000)
+		# Shuffle min range and std dev: 8923, 3914.881497426057
+		# Shuffle max range and std dev: 31900, 12547.59303168894
+		# Shuffle mean range and std dev: 23114.5870625, 8466.038283025504
+
 	else:
-		frames_mask = np.load(str(frames_mask_path))
-
-# Results of using a custom vehicle filter_type, 0.8 prob thresh, and 2.0 m/s speed thresh:
-# ==============================
-# Writing to /media/data/l5kit-data/scenes/train.zarr/agents_mask/0.8_vehicle_sp2.0
-# start report for /media/data/l5kit-data/scenes/train.zarr
-# {   'reject_th_AV_distance': 12772912,
-#     'reject_th_agent_filter_probability_threshold': 289927706,
-#     'reject_th_extent': 3206991,
-#     'reject_th_yaw': 31244,
-#     'th_agent_filter_probability_threshold': 0.8,
-#     'th_distance_av': 50,
-#     'th_extent_ratio': 1.1,
-#     'th_yaw_degree': 30,
-#     'total_agent_frames': 320124624,
-#     'total_reject': 305938853}
-# computing past/future table:
-# +-------------+-----------+---------+---------+---------+
-# | past/future |     0     |    10   |    30   |    50   |
-# +-------------+-----------+---------+---------+---------+
-# |      0      | 320124624 | 7047605 | 3379755 | 1836965 |
-# |      10     |  7047605  | 4766174 | 2466861 | 1384948 |
-# |      30     |  3379755  | 2466861 | 1384948 |  826962 |
-# |      50     |  1836965  | 1384948 |  826962 |  518052 |
-# +-------------+-----------+---------+---------+---------+
-# end report for /media/data/l5kit-data/scenes/train.zarr
-# Saved mask: 1384948 of 320124624
-# Downsampling 31980917 of 320124624
-# Combined: 133891  of 320124624
-# 133891 0.000418246488904896
-# ==============================
-# Writing to /media/data/l5kit-data/scenes/validate.zarr/agents_mask/0.8_vehicle_sp2.0
-# start report for /media/data/l5kit-data/scenes/validate.zarr
-# {   'reject_th_AV_distance': 12900207,
-#     'reject_th_agent_filter_probability_threshold': 282912089,
-#     'reject_th_extent': 3158362,
-#     'reject_th_yaw': 30026,
-#     'th_agent_filter_probability_threshold': 0.8,
-#     'th_distance_av': 50,
-#     'th_extent_ratio': 1.1,
-#     'th_yaw_degree': 30,
-#     'total_agent_frames': 312617887,
-#     'total_reject': 299000684}
-# computing past/future table:
-# +-------------+-----------+---------+---------+---------+
-# | past/future |     0     |    10   |    30   |    50   |
-# +-------------+-----------+---------+---------+---------+
-# |      0      | 312617887 | 6679230 | 3170220 | 1704359 |
-# |      10     |  6679230  | 4494943 | 2299981 | 1278493 |
-# |      30     |  3170220  | 2299981 | 1278493 |  756509 |
-# |      50     |  1704359  | 1278493 |  756509 |  469667 |
-# +-------------+-----------+---------+---------+---------+
-# end report for /media/data/l5kit-data/scenes/validate.zarr
-# ==============================
-# Saved mask: 1278493 of 312617887
-# Downsampling 31214236 of 312617887
-# Combined: 123273  of 312617887
-# 123273 0.00039432484552619343
-
+		raise ValueError("Invalid mode: {}".format(mode))

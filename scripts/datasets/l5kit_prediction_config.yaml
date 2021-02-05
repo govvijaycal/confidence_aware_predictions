@@ -4,17 +4,9 @@ format_version: 4
 ###################
 ## Model options
 model_params:
-  model_architecture: "resnet50"
-
   history_num_frames: 10
   future_num_frames: 50
   step_time: 0.1
-
-###################
-## Agent selection options
-agent_select_params:
-  filter_type: "vehicle"
-  speed_thresh: 2.0
 
 ###################
 ## Input raster parameters
@@ -31,7 +23,7 @@ raster_params:
   ego_center:
     - 0.2 # 10 m behind, 40 in front
     - 0.5 # +/- 25 m on the sides
-  # This is with respect to history_num_frames above and 1-indexed s.t. index N = N frames before.
+  # frames_to_plot is with respect to history_num_frames above and 1-indexed s.t. index N = N frames before.
   frames_to_plot:
     - 2  # 0.2 s before
     - 6  # 0.6 s before
@@ -60,20 +52,7 @@ raster_params:
 ###################
 ## Data loader options
 train_data_loader:
-  key: "scenes/train.zarr"
-  batch_size: 16
-  shuffle: True
-  num_workers: 16
+  key: "scenes/train_full.zarr"
 
 val_data_loader:
   key: "scenes/validate.zarr"
-  batch_size: 16
-  shuffle: False
-  num_workers: 16
-
-###################
-## Train params
-train_params:
-  checkpoint_every_n_steps: 10000
-  max_num_steps: 10000
-  eval_every_n_steps: 10000
