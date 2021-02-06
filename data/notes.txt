@@ -2,3 +2,39 @@ For the NuScenes dataset, the following stats were given:
 train_val -> Finished writing: 9 splits, 7884 entries written out of 8560
 val       -> Finished writing: 10 splits, 8379 entries written out of 9041
 train     -> Finished writing: 33 splits, 29808 entries written out of 32186
+
+Training set:   nuscenes_train_X.record
+Validation set: nuscenes_train_val_Y.record
+Test set:       nuscenes_val_Z.record
+
+============================================================================
+
+For L5Kit, the following stats were given:
+
+Dataset val: downsampling and removing trajectories with length < 5.0 m.
+Dataset val: performing stratified sampling over length and curvature.
+Computing lengths/curvatures - approx. 3334 iterations.
+3335it [04:03, 13.69it/s]
+Partition 1 has 83487 elements.
+Partition 2 has 8595 elements.
+Partition 3 has 6144 elements.
+Partition 4 has 107687 elements.
+Partition 5 has 4152 elements.
+Partition 6 has 3365 elements.
+Dataset val has 9000 instances out of 4030296.
+
+Dataset train: downsampling and removing trajectories with length < 5.0 m.
+Dataset train: performing stratified sampling over length and curvature.
+Computing lengths/curvatures - approx. 27596 iterations.
+27597it [37:06, 12.39it/s]
+Partition 1 has 692626 elements.
+Partition 2 has 66687 elements.
+Partition 3 has 44779 elements.
+Partition 4 has 903192 elements.
+Partition 5 has 31679 elements.
+Partition 6 has 27236 elements.
+Dataset train has 45000 instances out of 33437057.
+
+Training set:   l5kit_train_X.record for X in [0, ..., 35]  -> 36000
+Validation set: l5kit_train_Y.record for Y in [36, ..., 44] -> 9000
+Test set:       l5kit_val_Z.record for Z in [0, ..., 8]     -> 9000
