@@ -1,4 +1,6 @@
 # Custom additions to below:
+*curvs.npy
+*lengths.npy
 *.record
 *.png
 log/*/
