@@ -3,15 +3,20 @@ import glob
 import argparse
 import numpy as np
 import matplotlib.pyplot as plt
+from tqdm import tqdm
+
 import tensorflow as tf
 from tslearn.clustering import TimeSeriesKMeans, silhouette_score
 from sklearn.cluster import KMeans
-from tfrecord_utils import _parse_function
 from colorsys import hsv_to_rgb
+
+from tfrecord_utils import _parse_function
+from splits import L5KIT_TRAIN, L5KIT_VAL, L5KIT_TEST, \
+                   NUSCENES_TRAIN, NUSCENES_VAL, NUSCENES_TEST
 
 ##########################################
 # Loading and visualizing a trajectory dataset.
-def load_trajectory_dataset(tfrecord_files, init_size=(30000, 12, 3)):
+def load_trajectory_dataset(tfrecord_files, batch_size=64, init_size=(30000, 12, 3)):
 	""" Given a set of tfrecords, assembles a np.array containing all future trajectories. """
 
 	# The size is M x N x 3, where:
@@ -22,11 +27,19 @@ def load_trajectory_dataset(tfrecord_files, init_size=(30000, 12, 3)):
 
 	dataset = tf.data.TFRecordDataset(tfrecord_files)
 	dataset = dataset.map(_parse_function)
+	dataset = dataset.batch(batch_size)
 
-	for ind, entry in enumerate(dataset):
-		trajectory_dataset[ind,:,:] = entry['future_poses_local'] # x, y, theta
-	
-	num_elements = ind + 1
+	print("Loading data: ")
+	num_elements = 0
+
+	for ind_batch, entry_batch in tqdm(enumerate(dataset)):
+		poses = entry_batch['future_poses_local'] # x, y, theta
+		num_elements += poses.shape[0]
+
+		st_ind  = batch_size * ind_batch
+		end_ind = st_ind + poses.shape[0]
+		trajectory_dataset[st_ind:end_ind,:,:] = poses
+
 	return trajectory_dataset[:num_elements, :, :]
 
 def plot_trajectory_dataset(trajectory_dataset):
@@ -102,7 +115,7 @@ def check_stratified_coverage(trajectory_dataset):
 	part5 = np.logical_and( above_50, curvs > 0.002)
 	part6 = np.logical_and( above_50, curvs < -0.002)
 
-	for part in [part1, part2, part3, part4, part5, part6]:
+	for ind_part, part in enumerate([part1, part2, part3, part4, part5, part6]):
 		print(f"Partition {ind_part+1} has {np.sum(part)} elements.")	
 
 ##########################################
@@ -261,12 +274,11 @@ if __name__ == '__main__':
 	datadir = args.datadir
 	
 	if dataset == 'nuscenes':
-		train_set = glob.glob(datadir + '/nuscenes_train*.record')
-		train_set = [x for x in train_set if 'val' not in x]
+		train_set = NUSCENES_TRAIN
 		init_size = (32000, 12, 3)
 	elif dataset == 'l5kit':
-		train_set = glob.glob(datadir + '/l5kit_train*.record')	
-		init_size = (32000, 25, 3)
+		train_set = L5KIT_TRAIN
+		init_size = (36000, 25, 3)
 	else:
 		raise ValueError(f"Dataset {dataset} not supported.")
 
@@ -274,17 +286,17 @@ if __name__ == '__main__':
 
 	if mode == 'visualize':
 		plot_trajectory_dataset(trajectory_dataset)
+		check_stratified_coverage(trajectory_dataset)
 	elif mode == 'cluster':		
 		cluster_trajs = identify_clusters(trajectory_dataset, n_clusters=n_clusters)
 
-		weights = get_anchor_weights(anchors, trajectory_dataset)
+		weights = get_anchor_weights(cluster_trajs, trajectory_dataset)
 		print("Anchor ID: Weight")
 		[print(w_id, w) for (w_id, w) in zip(range(n_clusters), weights)]
 
 		np.save( f"{datadir}/{dataset}_clusters_{n_clusters}.npy", cluster_trajs)	
 		np.save( f"{datadir}/{dataset}_clusters_{n_clusters}_weights.npy", weights)
 	else:
-		# Unused but useful util functions (maybe add more modes if needed):
-		# identify_clusters_length_curvature, check_stratified_coverage, 
-		# constant_length_curv_to_trajectories
+		# Unused util functions related to clustering in length/curv space:
+		# identify_clusters_length_curvature, constant_length_curv_to_trajectories
 		raise ValueError(f"Mode {mode} not valid.")
