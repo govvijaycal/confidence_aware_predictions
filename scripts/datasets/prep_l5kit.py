@@ -1,5 +1,4 @@
 import os
-import glob
 import numpy as np
 import argparse
 from tqdm import tqdm
@@ -25,6 +24,7 @@ from l5kit.visualization import PREDICTED_POINTS_COLOR, TARGET_POINTS_COLOR, dra
 from l5kit.data import PERCEPTION_LABELS
 
 from tfrecord_utils import write_tfrecord, visualize_tfrecords, shuffle_test
+from splits import L5KIT_TRAIN
 ##########################################
 # Utils below for downsampling full l5kit dataset to a final set for TFRecord generation.
 MIN_EGO_TRAJ_LENGTH = 5.0 # m, could add this to config file if desired.
@@ -299,18 +299,16 @@ if __name__ == '__main__':
 			               shuffle = True,      
 			               shuffle_seed = 0,    
 			               max_per_record = 1000)
-	elif mode == 'read':
-		train_set = glob.glob(datadir + '/l5kit_train*.record')
-		visualize_tfrecords(train_set, max_batches=100)
+	elif mode == 'read':		
+		visualize_tfrecords(L5KIT_TRAIN, max_batches=100)
 
-	elif mode == 'batch_test':
-		train_set = glob.glob(datadir + '/l5kit_train*.record')
-		shuffle_test(train_set, batch_size=32)
+	elif mode == 'batch_test':		
+		shuffle_test(L5KIT_TRAIN, batch_size=32)
 
-		# Results: shows good shuffling (dataset size 32000)
-		# Shuffle min range and std dev: 8923, 3914.881497426057
-		# Shuffle max range and std dev: 31900, 12547.59303168894
-		# Shuffle mean range and std dev: 23114.5870625, 8466.038283025504
+		# Results: shows good shuffling (dataset size 36000)
+		# Shuffle min range and std dev:  5115, 2125.1508508548022
+		# Shuffle max range and std dev:  35775, 13029.754150490415
+		# Shuffle mean range and std dev: 26219.215444444446, 9346.355554486263
 
 	else:
 		raise ValueError("Invalid mode: {}".format(mode))

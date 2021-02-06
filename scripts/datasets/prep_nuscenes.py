@@ -1,5 +1,4 @@
 import os
-import glob
 import numpy as np
 from pyquaternion import Quaternion
 from functools import partial
@@ -17,6 +16,7 @@ from nuscenes.prediction.input_representation.combinators import Rasterizer
 
 from tfrecord_utils import write_tfrecord, visualize_tfrecords, shuffle_test
 from pose_utils import convert_global_to_local, convert_local_to_global, pose_diff_norm
+from splits import NUSCENES_TRAIN
 
 ##########################################
 # Helper functions to convert annotations into a list of poses.
@@ -140,16 +140,12 @@ if __name__ == '__main__':
 			               shuffle_seed = 0,    
 			               max_per_record = 1000)
 	elif mode == 'read':
-		train_set = glob.glob(datadir + '/nuscenes_train*.record')
-		train_set = [x for x in train_set if 'val' not in x]
-		visualize_tfrecords(train_set, max_batches=100)
+		visualize_tfrecords(NUSCENES_TRAIN, max_batches=100)
 
-	elif mode == 'batch_test':
-		train_set = glob.glob(datadir + '/nuscenes_train*.record')
-		train_set = [x for x in train_set if 'val' not in x]
-		shuffle_test(train_set, batch_size=32)
+	elif mode == 'batch_test':		
+		shuffle_test(NUSCENES_TRAIN, batch_size=32)
 
-		# Results: shows good shuffling (dataset size approx. 32000)
+		# Results: shows good shuffling (dataset size 29808)
 		# Shuffle min range and std dev: 9375, 3678.020500969993
 		# Shuffle max range and std dev: 29670, 11924.862244720294
 		# Shuffle mean range and std dev: 21017.645061728395, 7663.28797797656
