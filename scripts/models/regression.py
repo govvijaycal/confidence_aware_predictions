@@ -1,8 +1,13 @@
+import os
+import sys
+import numpy as np
 import tensorflow as tf 
 from tensorflow.keras.layers import Input, Dense                                     
 from tensorflow.keras import Model
 
-from multipath_base import MultiPathBase
+scriptdir = os.path.abspath(__file__).split('scripts')[0] + 'scripts/'
+sys.path.append(scriptdir)
+from models.multipath_base import MultiPathBase
 
 class Regression(MultiPathBase):
 	'''Regression Baseline as used by the MultiPath architecture.  
@@ -18,11 +23,11 @@ class Regression(MultiPathBase):
 
 		backbone = self.resnet_backbone(image_input, state_input)			
 
-		# Output: 5 * T trajectory (mu_x, mu_y, sigma_x, sigma_y, theta).
+		# Output: 5 * T trajectory (mu_x, mu_y, std_1, std_2, theta).
 		pred = Dense(self.num_timesteps * 5, 
 			         activation=None)(backbone)
 
-		model = Model(inputs=[image_input, state_input], outputs=pred)
+		model = Model(inputs=[image_input, state_input], outputs=pred, name='Regression')
 		loss_function = self.likelihood_loss_1()
 		metric_function = self.ade_1()
 
