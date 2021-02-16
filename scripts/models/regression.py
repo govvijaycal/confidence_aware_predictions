@@ -19,7 +19,7 @@ class Regression(MultiPathBase):
 		super().__init__(**kwargs)
 
 	def _create_model(self):
-		image_input = Input(shape=self.image_shape, name='image_input')		
+		image_input = Input(shape=self.image_shape, name='image_input')
 		state_input = Input(shape=self.past_state_shape, name='state_input')
 
 		backbone = self.resnet_backbone(image_input, state_input)			
@@ -61,8 +61,7 @@ class Regression(MultiPathBase):
 			mode_dict['mus'] = traj_xy
 			mode_dict['sigmas'] = sigmas
 
-			gmm_dict = {0: mode_dict} # unimodal
-			gmm_dicts.append(gmm_dicts)
+			gmm_dicts.append({0: mode_dict})
 
 		return gmm_dicts
 

@@ -194,8 +194,8 @@ class MultiPathBase(ABC):
 			ades   = []			
 
 			for entry in dataset:
-				img, past_states, future_xy = self.preprocess_entry(entry)				
-				batch_loss, batch_ade = self.model.train_on_batch([img, past_states], future_xy)				
+				img, past_states, future_xy = self.preprocess_entry(entry)
+				batch_loss, batch_ade = self.model.train_on_batch([img, past_states], future_xy)
 				losses.append(batch_loss)
 				ades.append(batch_ade)				
 
@@ -209,7 +209,7 @@ class MultiPathBase(ABC):
 
 				for entry in val_dataset:
 					img, past_states, future_xy = self.preprocess_entry(entry)
-					batch_loss, batch_ade = self.model.test_on_batch([img, past_states], future_xy)					
+					batch_loss, batch_ade = self.model.test_on_batch([img, past_states], future_xy)
 					val_losses.append(batch_loss)
 					val_ades.append(batch_ade)
 
@@ -240,28 +240,26 @@ class MultiPathBase(ABC):
 		self.trained = True
 
 	def predict(self, dataset):
-		#FIXME.
 		""" Given a dataset, returns the GMM predictions for further analysis.
 		    This drops the image from the result dictionary to reduce memory footprint. """
-
 		res_dict = {}
 
 		dataset = tf.data.TFRecordDataset(dataset)
 		dataset = dataset.map(_parse_function)
 		dataset = dataset.batch(32)
 
-		for entry in dataset:
+		for entry in tqdm(dataset):
 			keys = [f"{tf.compat.as_str(x)}_{tf.compat.as_str(y)}"
 			        for (x, y) in zip(entry['sample'].numpy(), entry['instance'].numpy())
 			       ]
-			imgs, states, future_xys = self.preprocess_entry(entry)
-			gmm_pred  = self.model.predict_on_batch([img, state])
+			img, past_states, future_xy = self.preprocess_entry(entry)
+			gmm_pred  = self.model.predict_on_batch([img, past_states])
 			gmm_dicts = self._extract_gmm_params(gmm_pred)
 
-			for (key, state, traj_xy, gmm_dict) in  zip(keys, states, future_xys, gmm_dicts):
+			for (key, pstate, traj_xy, gmm_dict) in  zip(keys, past_states, future_xys, gmm_dicts):
 				entry_dict = {}
 				# TODO: figure out what other information is required to save.				
-				entry_dict['state']    = state.numpy()   # vel, accel, yaw_rate
+				entry_dict['pstate']   = pstate.numpy()   # vel, accel, yaw_rate
 				entry_dict['traj']     = traj_xy.numpy() # ground truth XY trajectory
 				entry_dict['gmm_pred'] = gmm_dict        # GMM predictions
 				res_dict[key] = entry_dict
@@ -269,17 +267,18 @@ class MultiPathBase(ABC):
 		return res_dict
 
 	def predict_instance(self, image_raw, velocity, acceleration, yaw_rate):
-		#FIXME.
-		if len(image_raw.shape) == 3:
-			image_raw = tf.expand_dims(image_raw, axis=0)
-		img = preprocess_input( tf.cast(image_raw, dtype=tf.float32) )		
+		raise NotImplementedError
+		#FIXME.  Should be using pose history.
+		# if len(image_raw.shape) == 3:
+		# 	image_raw = tf.expand_dims(image_raw, axis=0)
+		# img = preprocess_input( tf.cast(image_raw, dtype=tf.float32) )		
 
-		state = tf.constant([[velocity, acceleration ,yaw_rate]], dtype=tf.float32)
+		# state = tf.constant([[velocity, acceleration ,yaw_rate]], dtype=tf.float32)
 		
-		gmm_pred = self.model.predict_on_batch([img, state])
-		gmm_dict = self._extract_gmm_params(gmm_pred)[0]
+		# gmm_pred = self.model.predict_on_batch([img, state])
+		# gmm_dict = self._extract_gmm_params(gmm_pred)[0]
 
-		return gmm_dict
+		# return gmm_dict
 
 	def save_weights(self, path):
 		path = path if '.h5' in path else (path + '.h5')

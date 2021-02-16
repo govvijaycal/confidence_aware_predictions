@@ -207,4 +207,4 @@ if __name__ == '__main__':
 
 	anchors = np.load(datadir + '/nuscenes_clusters_16.npy')
 	weights = np.load(datadir + '/nuscenes_clusters_16_weights.npy')	
-	m = MultiPath(anchors=anchors, weights=weights, num_timesteps=12)
+	m = MultiPath(anchors=anchors, weights=weights, num_timesteps=12, num_hist_timesteps=2)
