@@ -5,31 +5,31 @@ import numpy as np
 
 from models.regression import Regression
 from models.multipath import MultiPath
-from datasets.splits import L5KIT_TRAIN, L5KIT_VAL
+from datasets.splits import NUSCENES_TRAIN, NUSCENES_VAL
 
 if __name__ == '__main__':
 	repo_path = os.path.abspath(__file__).split('scripts')[0]
 
 	# Full list of experiments for reference.  Can pick a subset to run on.
-	names  = ['l5kit_regression_lstm', 'l5kit_multipath_lstm']
-	models = [Regression, MultiPath]	
+	names  = ['nuscenes_regression_lstm', 'nuscenes_multipath_lstm']
+	models = [Regression, MultiPath]
 
-	l5kit_anchors = np.load(repo_path + 'data/l5kit_clusters_16.npy')
-	l5kit_weights = np.load(repo_path + 'data/l5kit_clusters_16_weights.npy')
+	nuscenes_anchors = np.load(repo_path + 'data/nuscenes_clusters_16.npy')
+	nuscenes_weights = np.load(repo_path + 'data/nuscenes_clusters_16_weights.npy')
 
 	for name, model in zip(names, models):
 		# Construct the model.
 		if model == Regression:
-			m = model(num_timesteps=25, num_hist_timesteps=5)
+			m = model(num_timesteps=12, num_hist_timesteps=2)
 		else:
-			m = model(num_timesteps=25, num_hist_timesteps=5, \
-				      anchors=l5kit_anchors, weights=l5kit_weights)
+			m = model(num_timesteps=12, num_hist_timesteps=2, \
+				      anchors=nuscenes_anchors, weights=nuscenes_weights)
 		
 		logdir = f"{repo_path}log/{name}/"
 
 		# Train the model.
-		m.fit(L5KIT_TRAIN, 
-			  L5KIT_VAL,
+		m.fit(NUSCENES_TRAIN, 
+			  NUSCENES_VAL,
 			  logdir=logdir,
 			  log_epoch_freq=2,
 			  save_epoch_freq=10,

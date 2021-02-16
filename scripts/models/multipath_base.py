@@ -3,12 +3,13 @@ import sys
 import numpy as np
 from abc import ABC, abstractmethod
 from datetime import datetime
+from tqdm import tqdm
 
 import tensorflow as tf 
 import tensorflow.keras.backend as K
 from tensorflow.keras.applications import ResNet50
 from tensorflow.keras.applications.resnet import preprocess_input
-from tensorflow.keras.layers import Input, LeakyReLU, Conv2D, Dense, Dropout, \
+from tensorflow.keras.layers import Input, LeakyReLU, Conv2D, Dense, Dropout, LSTM, \
                                     BatchNormalization, Flatten, concatenate, AveragePooling2D
 from tensorflow.keras.regularizers import l2
 from tensorflow.keras.optimizers import SGD
@@ -23,14 +24,16 @@ class MultiPathBase(ABC):
 
 	def __init__(self,
 		         num_timesteps=25,
+		         num_hist_timesteps=5,
 		         lr_min=1e-4,
 		         lr_max=1e-3,
 		         lr_max_decay=1e-2,
 		         lr_period=10):
 		
 		self.num_timesteps = num_timesteps
+		self.history_timesteps = num_hist_timesteps
 		self.image_shape = (500, 500, 3)
-		self.state_shape = (3,)
+		self.past_state_shape = (self.history_timesteps, 4)
 		
 		self.lr_min = lr_min
 		self.lr_max = lr_max
@@ -73,7 +76,7 @@ class MultiPathBase(ABC):
 		raise NotImplementedError
 
 	@staticmethod
-	def resnet_backbone( image_input, state_input, l2_penalty=1e-2):
+	def resnet_backbone( image_input, past_state_input, l2_penalty=1e-2):
 		""" Provides a common ResNet50 backbone to generate
 			image/state features for further processing. """
 
@@ -113,7 +116,9 @@ class MultiPathBase(ABC):
 						kernel_regularizer=l2(l2_penalty),
 						bias_regularizer=l2(l2_penalty))(x)		
 
-		x = Flatten()(x)		
+		x = Flatten()(x)
+
+		state_input = LSTM(16)(past_state_input)
 		y = concatenate([x, state_input])
 		y = BatchNormalization()(y)
 
@@ -131,13 +136,19 @@ class MultiPathBase(ABC):
 		""" Prepares a batch of features = (images, states) and labels = xy trajectory.
 		    given an entry from a TF Dataset. """
 		img = preprocess_input( tf.cast(entry['image'], dtype=tf.float32) )		
-		state = tf.cast(tf.concat([entry['velocity'],
-		                           entry['acceleration'],
-		                           entry['yaw_rate']], -1),
-			            dtype=tf.float32)
+		# state = tf.cast(tf.concat([entry['velocity'],
+		#                            entry['acceleration'],
+		#                            entry['yaw_rate']], -1),
+		# 	            dtype=tf.float32)
 		future_xy = tf.cast(entry['future_poses_local'][:,:,:2], dtype=tf.float32)
 
-		return img, state, future_xy
+		# Concatenate relative timestamp with poses.  Flip the ordering so the first entry is the
+		# earliest timestamp and the last entry is the most recent timestamp.
+		past_states = tf.cast(tf.concat([tf.expand_dims(entry['past_tms'][:, ::-1], -1),
+			                             entry['past_poses_local'][:, ::-1, :]], -1),
+		                      dtype=tf.float32)
+
+		return img, past_states, future_xy
 
 	def fit(self, 
 		    train_set, 
@@ -183,8 +194,8 @@ class MultiPathBase(ABC):
 			ades   = []			
 
 			for entry in dataset:
-				img, state, future_xy = self.preprocess_entry(entry)
-				batch_loss, batch_ade = self.model.train_on_batch([img, state], future_xy)				
+				img, past_states, future_xy = self.preprocess_entry(entry)				
+				batch_loss, batch_ade = self.model.train_on_batch([img, past_states], future_xy)				
 				losses.append(batch_loss)
 				ades.append(batch_ade)				
 
@@ -197,8 +208,8 @@ class MultiPathBase(ABC):
 				val_ades   = []
 
 				for entry in val_dataset:
-					img, state, future_xy = self.preprocess_entry(entry)
-					batch_loss, batch_ade = self.model.test_on_batch([img, state], future_xy)
+					img, past_states, future_xy = self.preprocess_entry(entry)
+					batch_loss, batch_ade = self.model.test_on_batch([img, past_states], future_xy)					
 					val_losses.append(batch_loss)
 					val_ades.append(batch_ade)
 
@@ -229,6 +240,7 @@ class MultiPathBase(ABC):
 		self.trained = True
 
 	def predict(self, dataset):
+		#FIXME.
 		""" Given a dataset, returns the GMM predictions for further analysis.
 		    This drops the image from the result dictionary to reduce memory footprint. """
 
@@ -257,6 +269,7 @@ class MultiPathBase(ABC):
 		return res_dict
 
 	def predict_instance(self, image_raw, velocity, acceleration, yaw_rate):
+		#FIXME.
 		if len(image_raw.shape) == 3:
 			image_raw = tf.expand_dims(image_raw, axis=0)
 		img = preprocess_input( tf.cast(image_raw, dtype=tf.float32) )		

@@ -1,6 +1,7 @@
 import os
 import sys
 import numpy as np
+
 import tensorflow as tf 
 from tensorflow.keras.layers import Input, Dense                                     
 from tensorflow.keras import Model
@@ -18,8 +19,8 @@ class Regression(MultiPathBase):
 		super().__init__(**kwargs)
 
 	def _create_model(self):
-		image_input = Input(shape=self.image_shape, name='image_input')
-		state_input = Input(shape=self.state_shape, name='state_input')
+		image_input = Input(shape=self.image_shape, name='image_input')		
+		state_input = Input(shape=self.past_state_shape, name='state_input')
 
 		backbone = self.resnet_backbone(image_input, state_input)			
 
