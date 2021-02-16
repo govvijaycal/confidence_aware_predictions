@@ -3,6 +3,7 @@ import sys
 import numpy as np
 from abc import ABC, abstractmethod
 from datetime import datetime
+from tqdm import tqdm
 
 import tensorflow as tf 
 import tensorflow.keras.backend as K
@@ -231,19 +232,18 @@ class MultiPathBase(ABC):
 	def predict(self, dataset):
 		""" Given a dataset, returns the GMM predictions for further analysis.
 		    This drops the image from the result dictionary to reduce memory footprint. """
-
 		res_dict = {}
 
 		dataset = tf.data.TFRecordDataset(dataset)
 		dataset = dataset.map(_parse_function)
 		dataset = dataset.batch(32)
 
-		for entry in dataset:
+		for entry in tqdm(dataset):
 			keys = [f"{tf.compat.as_str(x)}_{tf.compat.as_str(y)}"
 			        for (x, y) in zip(entry['sample'].numpy(), entry['instance'].numpy())
 			       ]
 			imgs, states, future_xys = self.preprocess_entry(entry)
-			gmm_pred  = self.model.predict_on_batch([img, state])
+			gmm_pred  = self.model.predict_on_batch([imgs, states])
 			gmm_dicts = self._extract_gmm_params(gmm_pred)
 
 			for (key, state, traj_xy, gmm_dict) in  zip(keys, states, future_xys, gmm_dicts):

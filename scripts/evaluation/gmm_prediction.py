@@ -1,0 +1,125 @@
+import numpy as np 
+
+class GMMPrediction:
+	""" This class allows for metric evaluation of GMM-based predictions. """
+	
+	def __init__(self, n_modes, n_timesteps, mode_probabilities, mus, sigmas):
+		self.n_modes = n_modes
+		self.n_timesteps = n_timesteps
+
+		assert mode_probabilities.shape == (self.n_modes,)
+		assert np.sum(mode_probabilities) == 1. and np.all(mode_probabilities >= 0.)
+
+		self.mode_probabilities = mode_probabilities
+
+		assert mus.shape == (self.n_modes, self.n_timesteps, 2)
+		self.mus = mus
+
+		assert sigmas.shape == (self.n_modes, self.n_timesteps, 2, 2)
+		self.sigmas = sigmas
+
+	def get_top_k_anchor_predictions(self, k=1):
+		return np.argsort(self.mode_probabilities)[-k:]
+
+	def get_top_k_GMM(self, k):
+		assert k > 0 and k < self.n_modes
+
+		# Find the top-k most likely modes. 
+		top_k_inds = self.get_top_k_anchor_predictions(k=k)
+
+		# Normalize the probabilities based on the subset of modes.
+		mode_probs_k = self.mode_probabilities[top_k_inds]
+		mode_probs_k = mode_probs_k / np.sum(mode_probs_k)
+
+		mus_k    = self.mus[top_k_inds, :, :]
+
+		sigmas_k = self.sigmas[top_k_inds, :, :, :]
+
+		return GMMPrediction(k, self.num_timesteps, mode_probs_k, mus_k, sigmas_k)
+
+	# TODO: Maybe useful to add a get_mode_label for IMM.
+
+	@staticmethod
+	def get_anchor_label(traj_xy, anchors):
+		# IMPORTANT: We assume that anchors are ordered and correspond
+		# 1-1 with self.mus!  So the label/prediction are consistent.
+		# This can be used to generate a confusion matrix or evaluate
+		# mode classification accuracies.
+		dists_to_anchor = [np.sum(np.linalg.norm(traj_xy - anc, axis=-1), axis=-1) for anc in anchors]
+		anchor_label = np.argmin(dists_to_anchor)
+
+		return anchor_label
+
+	##################################################################
+	#################### LIKELIHOOD METRIC ###########################
+	def compute_trajectory_log_likelihood(traj_xy):
+		# LL = log {sum_{k=1:num_modes} P(mode k) * product_{t=1:T} N[traj_xy(t); mus(t), sigmas(t)] }
+
+		assert traj_xy.shape == (self.n_timesteps, 2)
+
+		log_sum_arg = 0.
+		for mode in range(self.n_modes):
+			weight = self.mode_probabilities[mode]
+			residual_traj = traj_xy - self.mus[mode]
+
+			traj_product = 1.
+			for tm_step in range(self.n_timesteps):
+				covar = self.sigmas[mode, tm_step]
+				dist_term = residual_traj[tm_step].T @ np.linalg.inv(covar) @ residual_traj[tm_step]
+				gaussian_prob = (2*np.pi)**(-1) * np.linalg.det(covar)**(-0.5) * np.exp( -0.5 * dist_term )
+				traj_product *= gaussian_prob
+
+			log_sum_arg += weight * traj_product
+
+		return np.log(log_sum_arg)
+
+	##################################################################
+	################## CLASSIFICATION METRICS ########################
+	def get_class_top_k_scores(traj_xy, anchors, ks = [1, 3, 5]):
+		scores = []
+		anchor_label = get_anchor_label(traj_xy, anchors)
+
+		for k in ks:
+			acc_top_k = (anchor_label in self.get_top_k_anchor_predictions(k=k))
+			scores.append(acc_top_k)
+		
+		return scores
+	
+	# TODO: confusion matrix handled externally using get_anchor_label and get_top_k_anchor_predictions.
+
+	##################################################################
+	#################### TRAJECTORY METRICS ##########################
+	def compute_min_ADE(traj_xy):
+		# min_ADE = minimum average displacement error among all modes in the GMM.
+		ades = []
+
+		for mode in range(self.n_modes):
+			traj_xy_pred = self.mus[mode]
+			displacements = np.linalg.norm(traj_xy_pred - traj_xy, axis=-1)
+			ades.append(np.mean(displacements))
+
+		return np.amin(ades)
+
+	def compute_min_FDE(traj_xy):
+		# min FDE = minimum final displacement error among all modes in the GMM.
+		fdes = []
+
+		for mode in range(self.n_modes):
+			traj_xy_pred = self.mus[mode]
+			displacement_final = np.linalg.norm(traj_xy_pred[-1, :] - traj_xy[-1, :])
+			fdes.append(displacement_final)
+		
+		return np.amin(fdes)
+
+	def compute_hit_within_d(traj_xy, ds=[2., 5., 10.]):
+		# Hit = 1 if there exists a mode such that traj_xy falls within
+		# a 2 meter displacement "tube" of that mean trajectory.
+
+		traj_max_displacements = []
+
+		for mode in range(self.n_modes):
+			traj_xy_pred = self.mus[mode]
+			displacements = np.linalg.norm(traj_xy_pred - traj_xy, axis=-1)
+			traj_max_displacements.append(np.amax(displacements))
+
+		return np.amin(traj_max_displacements) <= ds

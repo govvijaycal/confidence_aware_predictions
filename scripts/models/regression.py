@@ -60,8 +60,7 @@ class Regression(MultiPathBase):
 			mode_dict['mus'] = traj_xy
 			mode_dict['sigmas'] = sigmas
 
-			gmm_dict = {0: mode_dict} # unimodal
-			gmm_dicts.append(gmm_dicts)
+			gmm_dicts.append({0: mode_dict})
 
 		return gmm_dicts
 
