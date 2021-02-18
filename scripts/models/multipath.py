@@ -73,9 +73,10 @@ class MultiPath(MultiPathBase):
 			trajectories = tf.reshape(entry[:-self.num_anchors],
 				                      (self.num_anchors, self.num_timesteps, 5))
 			anchor_probs = tf.nn.softmax( entry[-self.num_anchors:] ).numpy()
+			anchors = self.anchors.numpy()
 
 			for mode_id in range(self.num_anchors):			
-				traj_xy = (trajectories[mode_id, :, :2] + self.anchors[mode_id]).numpy()
+				traj_xy = (trajectories[mode_id, :, :2] + anchors[mode_id])
 
 				std1   = tf.math.exp(tf.math.abs(trajectories[mode_id, :, 2])).numpy()
 				std2   = tf.math.exp(tf.math.abs(trajectories[mode_id, :, 3])).numpy()

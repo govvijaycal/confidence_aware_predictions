@@ -242,7 +242,7 @@ class MultiPathBase(ABC):
 	def predict(self, dataset):
 		""" Given a dataset, returns the GMM predictions for further analysis.
 		    This drops the image from the result dictionary to reduce memory footprint. """
-		res_dict = {}
+		predict_dict = {}
 
 		dataset = tf.data.TFRecordDataset(dataset)
 		dataset = dataset.map(_parse_function)
@@ -252,33 +252,45 @@ class MultiPathBase(ABC):
 			keys = [f"{tf.compat.as_str(x)}_{tf.compat.as_str(y)}"
 			        for (x, y) in zip(entry['sample'].numpy(), entry['instance'].numpy())
 			       ]
-			img, past_states, future_xy = self.preprocess_entry(entry)
-			gmm_pred  = self.model.predict_on_batch([img, past_states])
-			gmm_dicts = self._extract_gmm_params(gmm_pred)
+			types = [tf.compat.as_str(x) for x in entry['type'].numpy()]
+			vxs   = np.ravel( tf.cast(entry['velocity'], dtype=tf.float32).numpy() )
+			wzs   = np.ravel( tf.cast(entry['yaw_rate'], dtype=tf.float32).numpy() )
+			accs  = np.ravel( tf.cast(entry['acceleration'], dtype=tf.float32).numpy() )
+			poses  = tf.cast(entry['pose'], dtype=tf.float32).numpy()
+			future_states = tf.cast(tf.concat([tf.expand_dims(entry['future_tms'], -1),
+			                             entry['future_poses_local']], -1), dtype=tf.float32)
 
-			for (key, pstate, traj_xy, gmm_dict) in  zip(keys, past_states, future_xys, gmm_dicts):
-				entry_dict = {}
-				# TODO: figure out what other information is required to save.				
-				entry_dict['pstate']   = pstate.numpy()   # vel, accel, yaw_rate
-				entry_dict['traj']     = traj_xy.numpy() # ground truth XY trajectory
-				entry_dict['gmm_pred'] = gmm_dict        # GMM predictions
-				res_dict[key] = entry_dict
+			img, past_states, _ = self.preprocess_entry(entry)
+			gmm_pred  = self.model.predict_on_batch([img, past_states]) # raw prediction tensor
+			gmm_dicts = self._extract_gmm_params(gmm_pred) # processed prediction as a dict
 
-		return res_dict
+			zip_obj = zip(keys, types, vxs, wzs, accs, poses, past_states, future_states, gmm_dicts)
+			
+			for key, atype, vx, wz, acc, pose, psts, fsts, gmm_dict in zip_obj:
+				predict_dict[key] = {'type': atype,
+				                     'velocity': vx,
+				                     'yaw_rate': wz,
+				                     'acceleration': acc,
+				                     'pose': pose,
+				                     'past_traj': psts.numpy(),
+				                     'future_traj': fsts.numpy(),
+				                     'gmm_pred': gmm_dict}
 
-	def predict_instance(self, image_raw, velocity, acceleration, yaw_rate):
-		raise NotImplementedError
-		#FIXME.  Should be using pose history.
-		# if len(image_raw.shape) == 3:
-		# 	image_raw = tf.expand_dims(image_raw, axis=0)
-		# img = preprocess_input( tf.cast(image_raw, dtype=tf.float32) )		
+		return predict_dict
 
-		# state = tf.constant([[velocity, acceleration ,yaw_rate]], dtype=tf.float32)
-		
-		# gmm_pred = self.model.predict_on_batch([img, state])
-		# gmm_dict = self._extract_gmm_params(gmm_pred)[0]
+	def predict_instance(self, image_raw, past_states):
+		raise NotImplementedError # need to check below code first.
+		"""
+		# TODO: figure out if image_raw should be a np.ndarray or tf.tensor.
+		if len(image_raw.shape) == 3:
+			image_raw = tf.expand_dims(image_raw, axis=0)
+		img = preprocess_input( tf.cast(image_raw, dtype=tf.float32) )	
 
-		# return gmm_dict
+		past_states = tf.cast(past_states, dtype=tf.float32)	
+
+		gmm_pred  = self.model.predict_on_batch([img, past_states]) # raw prediction tensor
+		return self._extract_gmm_params(gmm_pred)[0]
+		"""
 
 	def save_weights(self, path):
 		path = path if '.h5' in path else (path + '.h5')
