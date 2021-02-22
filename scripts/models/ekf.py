@@ -319,7 +319,8 @@ class EKFKinematicFull():
 
 		Q_fit = np.mean(Q_trajs, axis=0)
 		self.Q = Q_fit
-
+		
+		os.makedirs(logdir, exist_ok=True)
 		filename = logdir + 'params.pkl'
 		self.save_weights(filename)
 
