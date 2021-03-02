@@ -5,22 +5,27 @@ import numpy as np
 
 from models.regression import Regression
 from models.multipath import MultiPath
-from models.ekf import EKFKinematicFull
+from models.ekf import EKFKinematicFull, EKFKinematicCAH, EKFKinematicCVH
 from datasets.splits import NUSCENES_TRAIN, NUSCENES_VAL
 
 if __name__ == '__main__':
 	repo_path = os.path.abspath(__file__).split('scripts')[0]
 
 	# Full list of experiments for reference.  Can pick a subset to run on.
-	names  = ['nuscenes_regression_lstm', 'nuscenes_multipath_lstm', 'nuscenes_ekf']
-	models = [Regression, MultiPath, EKFKinematicFull]
+	name_model_list = []
+	name_model_list.append(['nuscenes_regression_lstm', Regression])
+	name_model_list.append(['nuscenes_multipath_lstm', MultiPath])
+	name_model_list.append(['nuscenes_ekf', EKFKinematicFull])
+	name_model_list.append(['nuscenes_ekf_cah', EKFKinematicCAH])
+	name_model_list.append(['nuscenes_ekf_cvh', EKFKinematicCVH])
 
 	nuscenes_anchors = np.load(repo_path + 'data/nuscenes_clusters_16.npy')
 	nuscenes_weights = np.load(repo_path + 'data/nuscenes_clusters_16_weights.npy')
 
-	for name, model in zip(names, models):
+	for name_model in name_model_list:
+		name, model = name_model
 		# Construct the model.
-		if model == EKFKinematicFull:
+		if issubclass(model, EKFKinematicFull):
 			m = model()
 		elif model == Regression:
 			m = model(num_timesteps=12, num_hist_timesteps=2)

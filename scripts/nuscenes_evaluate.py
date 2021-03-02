@@ -10,18 +10,8 @@ from tqdm import tqdm
 from models.regression import Regression
 from models.multipath import MultiPath
 from models.ekf import EKFKinematicFull, EKFKinematicCAH, EKFKinematicCVH
-from datasets.splits import L5KIT_TRAIN, L5KIT_VAL
+from datasets.splits import NUSCENES_TRAIN, NUSCENES_VAL
 from evaluation.gmm_prediction import GMMPrediction
-
-"""
-TODO: modes -> predict, evaluate, visualize.
-Prediction Code.  Pandas dataframe analysis + metrics reporting.
-ID examples to plot and plot it (aka MultiPath, Fig 3)
-Wrap up EKF impl. and plan out IMM impl process.
-Plan out MultiPath Dynamic impl.
-Closed-loop eval: Carla + val set resimulation.
-"""
-
 
 if __name__ == '__main__':
 	repo_path = os.path.abspath(__file__).split('scripts')[0]
@@ -30,14 +20,14 @@ if __name__ == '__main__':
 	
 	# Full list of experiments for reference.  Can pick a subset to run on.
 	name_model_weight_list = []
-	name_model_weight_list.append(['l5kit_regression_lstm', Regression, '00040_epochs.h5'])
-	name_model_weight_list.append(['l5kit_multipath_lstm', MultiPath, '00080_epochs.h5'])
-	name_model_weight_list.append(['l5kit_ekf', EKFKinematicFull, 'params.pkl'])
-	name_model_weight_list.append(['l5kit_ekf_cah', EKFKinematicCAH, 'params.pkl'])
-	name_model_weight_list.append(['l5kit_ekf_cvh', EKFKinematicCVH, 'params.pkl'])
+	name_model_weight_list.append(['nuscenes_regression_lstm', Regression, '00040_epochs.h5'])
+	name_model_weight_list.append(['nuscenes_multipath_lstm', MultiPath, '00080_epochs.h5'])
+	name_model_weight_list.append(['nuscenes_ekf', EKFKinematicFull, 'params.pkl'])
+	name_model_weight_list.append(['nuscenes_ekf_cah', EKFKinematicCAH, 'params.pkl'])
+	name_model_weight_list.append(['nuscenes_ekf_cvh', EKFKinematicCVH, 'params.pkl'])
 
-	l5kit_anchors = np.load(repo_path + 'data/l5kit_clusters_16.npy')
-	l5kit_weights = np.load(repo_path + 'data/l5kit_clusters_16_weights.npy')
+	nuscenes_anchors = np.load(repo_path + 'data/nuscenes_clusters_16.npy')
+	nuscenes_weights = np.load(repo_path + 'data/nuscenes_clusters_16_weights.npy')
 	
 	if mode == 'predict':
 		for name_model_weight in name_model_weight_list:
@@ -47,11 +37,11 @@ if __name__ == '__main__':
 				m = model()
 				epoch_label = name.split('_')[-1]
 			elif model == Regression:
-				m = model(num_timesteps=25, num_hist_timesteps=5)
+				m = model(num_timesteps=12, num_hist_timesteps=2)
 				epoch_label = weight.split('_')[0]
 			elif model == MultiPath:
-				m = model(num_timesteps=25, num_hist_timesteps=5,
-				          anchors=l5kit_anchors, weights=l5kit_weights)
+				m = model(num_timesteps=12, num_hist_timesteps=2,
+				          anchors=nuscenes_anchors, weights=nuscenes_weights)
 				epoch_label = weight.split('_')[0]
 			else:
 				raise ValueError(f"Invalid model: {model}")
@@ -60,12 +50,12 @@ if __name__ == '__main__':
 
 			m.load_weights(f"{logdir}{weight}")
 
-			predict_dict = m.predict(L5KIT_VAL)
+			predict_dict = m.predict(NUSCENES_VAL)
 			
 			pkl_name = f"{repo_path}log/{name}/predictions_{epoch_label}.pkl"
 			pickle.dump( predict_dict, open(pkl_name, "wb") )
 
-	elif mode == 'evaluate':		
+	elif mode == 'evaluate':
 		data_list = []
 		ks_eval = [1, 3, 5]		
 
@@ -119,7 +109,7 @@ if __name__ == '__main__':
 
 					data_list_entry.extend([gmm_pred_k.compute_trajectory_log_likelihood(future_xy_gt) \
 						                    for gmm_pred_k in gmm_pred_ks])
-					data_list_entry.extend(gmm_pred.get_class_top_k_scores(future_xy_gt, l5kit_anchors, ks_eval))
+					data_list_entry.extend(gmm_pred.get_class_top_k_scores(future_xy_gt, nuscenes_anchors, ks_eval))
 					data_list_entry.extend([gmm_pred_k.compute_min_ADE(future_xy_gt) \
 					                        for gmm_pred_k in gmm_pred_ks])
 					data_list_entry.extend([gmm_pred_k.compute_min_FDE(future_xy_gt) \
@@ -129,10 +119,9 @@ if __name__ == '__main__':
 
 				data_list.append(data_list_entry)	
 		metrics_df = pd.DataFrame(data_list, columns=columns)	
-		metrics_df.to_pickle(f"{repo_path}l5kit_metrics_df.pkl")
-		
-	elif mode == 'visualize':
-		metrics_df = pd.read_pickle(f"{repo_path}l5kit_metrics_df.pkl")
+		metrics_df.to_pickle(f"{repo_path}nuscenes_metrics_df.pkl")
+	elif mode == 'aggregate_metrics':
+		metrics_df = pd.read_pickle(f"{repo_path}nuscenes_metrics_df.pkl")
 		
 		model_names = set(metrics_df.model)
 
@@ -152,13 +141,16 @@ if __name__ == '__main__':
 				print(f"\t{metric}")
 				print(f"\t\tMean: {model_df[metric].mean()}")
 				print(f"\t\tStd: {model_df[metric].std()}")
-				print(f"\t\tMin: {model_df[metric].min()}")
-				print(f"\t\tMax: {model_df[metric].max()}")
+				# print(f"\t\tMin: {model_df[metric].min()}")
+				# print(f"\t\tMax: {model_df[metric].max()}")
+	elif mode == 'visualize':
+		# TODO: use metrics_df to identify some good cases to plot based on 
+		# mean metrics and variation of metrics across models.
+		metrics_df = pd.read_pickle(f"{repo_path}nuscenes_metrics_df.pkl")
 
-		# make aggregate plots
-		# save results
-		# use metrics to identify some interesting examples
-		# use opencv to overlay GMM distribution and GT
-		# save to pngs in logdir
+		# TODO: set up the rasterizer and predict helper.
+		# TODO: figure out the correct transform to overlay actual + GMM trajectories.
+		# TODO: figure out how to plot ellipses.
+		import pdb; pdb.set_trace()
 	else:
 		raise ValueError("Invalid mode!")

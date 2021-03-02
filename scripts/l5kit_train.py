@@ -5,22 +5,27 @@ import numpy as np
 
 from models.regression import Regression
 from models.multipath import MultiPath
-from models.ekf import EKFKinematicFull
+from models.ekf import EKFKinematicFull, EKFKinematicCAH, EKFKinematicCVH
 from datasets.splits import L5KIT_TRAIN, L5KIT_VAL
 
 if __name__ == '__main__':
 	repo_path = os.path.abspath(__file__).split('scripts')[0]
 
 	# Full list of experiments for reference.  Can pick a subset to run on.
-	names  = ['l5kit_regression_lstm', 'l5kit_multipath_lstm', 'l5kit_ekf']
-	models = [Regression, MultiPath, EKFKinematicFull]	
+	name_model_list = []
+	name_model_list.append(['l5kit_regression_lstm', Regression])
+	name_model_list.append(['l5kit_multipath_lstm', MultiPath])
+	name_model_list.append(['l5kit_ekf', EKFKinematicFull])
+	name_model_list.append(['l5kit_ekf_cah', EKFKinematicCAH])
+	name_model_list.append(['l5kit_ekf_cvh', EKFKinematicCVH])
 
 	l5kit_anchors = np.load(repo_path + 'data/l5kit_clusters_16.npy')
 	l5kit_weights = np.load(repo_path + 'data/l5kit_clusters_16_weights.npy')
 
-	for name, model in zip(names, models):
+	for name_model in name_model_list:
+		name, model = name_model
 		# Construct the model.
-		if model == EKFKinematicFull:
+		if issubclass(model, EKFKinematicFull):
 			m = model()
 		elif model == Regression:
 			m = model(num_timesteps=25, num_hist_timesteps=5)

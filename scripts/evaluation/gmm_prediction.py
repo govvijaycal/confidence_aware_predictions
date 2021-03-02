@@ -65,6 +65,16 @@ class GMMPrediction:
 			weight = self.mode_probabilities[mode]
 			residual_traj = traj_xy - self.mus[mode]
 
+			# # debugging:
+			# # triggered by negative det in CVH model, worth checking that out.
+			# with np.errstate(all='raise'):
+			# 	for covar in self.sigmas[mode]:
+			# 		try:
+			# 			np.log(np.linalg.det(covar))
+			# 		except Exception as e:
+			# 			print(e)
+			# 			import pdb; pdb.set_trace()
+
 			exp_term  = np.log(weight) - self.n_timesteps*np.log(2*np.pi)
 			exp_term += -0.5 * np.sum( [np.log(np.linalg.det(covar)) for covar in self.sigmas[mode]] )
 			exp_term += -0.5 * np.sum( [residual_traj[tm_step].T @ \

@@ -76,7 +76,7 @@ class MultiPath(MultiPathBase):
 			anchors = self.anchors.numpy()
 
 			for mode_id in range(self.num_anchors):			
-				traj_xy = (trajectories[mode_id, :, :2] + anchors[mode_id])
+				traj_xy = (trajectories[mode_id, :, :2].numpy() + anchors[mode_id])
 
 				std1   = tf.math.exp(tf.math.abs(trajectories[mode_id, :, 2])).numpy()
 				std2   = tf.math.exp(tf.math.abs(trajectories[mode_id, :, 3])).numpy()
