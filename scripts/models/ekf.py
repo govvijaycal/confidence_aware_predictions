@@ -16,6 +16,15 @@ def bound_angle_within_pi(angle):
 	# Refer to https://stackoverflow.com/questions/15927755/opposite-of-numpy-unwrap
 	return (angle + np.pi) % (2.0 * np.pi) - np.pi 
 
+# Note: Based on Fig. 4 of "Synthetic 2D LIDAR for precise vehicle localization in 3D urban environment", ICRA 2013,
+# I am setting a 3sigma bound of 20 cm position error and 1 degree orientation error.
+ORI_STD_ERROR   = np.radians(1.) / 3.          # std error of approx. 5.8e-3 radians for yaw angle
+POS_STD_ERROR   = 0.2 / 3.                     # std error of approx. 6.7 cm for position (radius of 1-std error circle)
+XY_STD_ERROR    = POS_STD_ERROR / np.sqrt(2.)  # std error of approx. 4.7 cm error along x or y axis
+VEL_INIT_ERROR  = 1.                           # guesstimate std error (m/s) for initial velocity state
+ACC_INIT_ERROR  = 1.                           # guesstimate std error (m/s^2) for initial acceleration state
+YR_INIT_ERROR   = 0.5                          # guesstimate std error (rad/s) for initial yawrate state
+
 class EKFKinematicFull():
 	''' 6-state Kinematic Extended Kalman Filter Implementation.
 
@@ -24,7 +33,7 @@ class EKFKinematicFull():
 	    y        = z[1], Y coordinate (m)
 	    theta    = z[2], yaw angle (rad) counterclockwise wrt X-axis
 	    v        = z[3], longitudinal speed (m/s)
-	    curv     = z[4], curvature (rad/m)
+	    w        = z[4], yaw_rate (rad/s)
 	    acc      = z[5], longitudinal acceleration, i.e. dv/dt (m/s^2)	    
 
 	    The measurement model is a pose measurement, i.e. o = [x, y, theta].
@@ -32,9 +41,11 @@ class EKFKinematicFull():
 
 	def __init__(self,
 		         z_init=np.zeros(6),
-		         P_init=np.diag(np.square([0.1, 0.1, 0.01, 1., 0.01, 1.])),
+		         P_init=np.diag(np.square([XY_STD_ERROR, XY_STD_ERROR, ORI_STD_ERROR, \
+		                                   VEL_INIT_ERROR, YR_INIT_ERROR, ACC_INIT_ERROR])),
 		         Q=np.eye(6),
-		         R=np.square([0.1, 0.1, 0.01])):
+		         R=np.square([XY_STD_ERROR, XY_STD_ERROR, ORI_STD_ERROR])):
+
 		self.nx = 6     # state dimension
 	
 		self.P_init = P_init # state covariance initial value, kept to reset the filter for different tracks.	
@@ -73,12 +84,12 @@ class EKFKinematicFull():
 		state[:self.nx] = self.z 
 		state[-1] = dt
 		self.z = self._dynamics_model(state)
-		A      = self._dynamics_jacobian(state)[:self.nx, :self.nx]
+		A      = self._dynamics_jacobian(state)
 		self.P = A @ self.P @ A.T + self.Q * dt**2
 
 	def measurement_update(self, measurement):
 		''' Performs the measurement update step, changing the state estimate (z, P).
-		    We assume but do not check that a time_update step was done first. '''
+		    We assume but do not check that a time_update step was done first. '''		
 		residual  = self._obs_model(self.z, measurement)
 		H         = self._obs_jacobian(self.z)
 
@@ -88,22 +99,21 @@ class EKFKinematicFull():
 		self.z    = self.z + K @ residual
 		self.z[2] = bound_angle_within_pi(self.z[2])
 		self.P    = (np.eye(self.nx) - K @ H) @ self.P
+		return residual, res_covar # return for innovation probability calculation
 
 	def _dynamics_model(self, state):
 		''' Given the current state at timestep t, returns the next state at timestep t+1. '''
 		# Note: we assume the vehicle is always moving forward and not in reverse.
-		x, y, th, v, curv, acc, dt = state
+		x, y, th, v, w, acc, dt = state
 		
 		staten = np.zeros((self.nx), dtype=state.dtype)
 		
 		staten[5] = acc
-		staten[4] = curv
-		staten[3] = max(v    + acc*dt, 0.)
-		vbar      = max(v    + 0.5*acc*dt, 0.)	
-		staten[2] = th   + vbar*curv*dt
-		thbar     = th   + 0.5*vbar*curv*dt
-		staten[1] = y    + vbar*np.sin(thbar)*dt
-		staten[0] = x    + vbar*np.cos(thbar)*dt
+		staten[4] = w
+		staten[3] = max(v    + acc*dt, 0.)		
+		staten[2] = th   + w*dt		
+		staten[1] = y    + v*np.sin(th)*dt
+		staten[0] = x    + v*np.cos(th)*dt		
 
 		return staten	
 
@@ -119,11 +129,10 @@ class EKFKinematicFull():
 			f_minus = self._dynamics_model(sminus)
 
 			jac[:,i] = (f_plus - f_minus) / (2.*eps)
-		return jac 
-
+		return jac
 
 	def _obs_model(self, state, measurement):
-		''' Returns the residual using the state estimate, measurement, and observation model. '''
+		''' Returns the residual using the state estimate, measurement, and observation model. '''		
 		expected    = self._obs_jacobian(state) @ state # linear measurement model
 		residual    = measurement - expected
 		residual[2] = bound_angle_within_pi(residual[2])
@@ -150,7 +159,6 @@ class EKFKinematicFull():
 			full_prior_states = self.state_completion(prior_tms, prior_poses)
 			
 			self._reset(full_prior_states[0])
-			
 
 			for dt, next_state in zip(prior_dts, full_prior_states[1:]):
 				self.time_update(dt)
@@ -166,7 +174,7 @@ class EKFKinematicFull():
 				covars.append(self.P)
 
 			mode_dict={}
-			mode_dict['mode_probability '] = 1.
+			mode_dict['mode_probability'] = 1.
 			mode_dict['mus'] = np.array([state[:2] for state in states])
 			mode_dict['sigmas'] = np.array([covar[:2, :2] for covar in covars])
 
@@ -221,8 +229,8 @@ class EKFKinematicFull():
 		return prior_tms, prior_poses, future_tms
 
 	@staticmethod
-	def state_completion(tms, poses, gamma=1.):
-		""" Estimate the velocity, curvature, and acceleration profile given a pose trajectory. """
+	def state_completion(tms, poses):
+		""" Estimate the velocity, yawrate, and acceleration profile given a pose trajectory. """
 		dts = np.diff(tms)
 		assert np.all(dts > 1e-3) # make sure dt is positive and not very small
 
@@ -230,59 +238,23 @@ class EKFKinematicFull():
 
 		""" Step 1: Estimate velocity and acceleration profile. """
 		displacements     = np.linalg.norm( dposes[:, :2], axis=-1)
-		vmids_raw = displacements / dts
-		num_inputs = len(vmids_raw)
+		v_est = displacements / dts
+		num_inputs = len(v_est)
 
-		# Acceleration estimation with jerk regularization:
-		# We are essentially "inverting" the midpoint integration (get_trajectory)
-		# to get this linear system.
-		# For A_acc, we choose to make acc_0 = acc_1. 
-		# This is done to ensure the linear system is determined.
-		A_acc = np.zeros((num_inputs-1, num_inputs-1))
-		b_acc = np.diff(vmids_raw)	
+		acc_est = np.diff(v_est) / dts[:-1]
+		acc_est = np.append(acc_est, acc_est[-1])
 
-		A_acc[0,0] = 0.5 * (dts[0] + dts[1]) # this is since we chose acc_0 = acc_1.
-		for row in range(1, A_acc.shape[0]):
-			# A_acc is a band matrix with values of dt in the rows after the initial row.		
-			A_acc[row, (row-1):(row+1)] = 0.5 * dts[row:(row+2)]
-
-		# D is simply a difference matrix, meant to get the "delta"-u (input derivative)
-		D = np.eye(num_inputs-1)
-		for x in range(num_inputs-2):
-			D[x, x+1] = -1
-		D = D[:-1, :]
-		
-		R = gamma * D.T @ D # regularization on jerk (i.e. delta-u formulation on acceleration).
-
-		# Solve for acceleration estimates using regularized LS.
-		if np.linalg.det( A_acc.T @ A_acc + R ) < 0.01:
-			print("Near-singular matrix detected.")
-			import pdb; pdb.set_trace()
-		x_acc     = np.linalg.pinv( A_acc.T @ A_acc + R ) @ A_acc.T @ b_acc	
-
-		# Extract acceleration profile, keeping in mind constraint that acc[0] = acc[1].
-		acc_est = [x_acc[0]]
-		acc_est.extend(x_acc)
-
-		# Step 2: Estimate curvature profile based on smooth/estimated velocity/accleration.
+		# Step 2: Estimate yawrate profile.
 		ang_displacements = dposes[:,2]
-		curvmids = ang_displacements / (np.maximum(vmids_raw, 0.1) * dts)
+		yr_est = ang_displacements / dts
 		
-		curv_est = curvmids
-
-		# Handle the final state by just assuming it's the same as the N-1 input.
-		# For practical purposes, this doesn't affect the trajectory.
-		curv_est = np.append(curv_est, [curv_est[-1]])
-		acc_est.append(acc_est[-1])
-
-		# We guess the velocity at the time endpoints by taking the midpoint velocities
-		# and using the acceleration estimates.
-		vs = []
-		for vmid, acc, dt in zip(vmids_raw, acc_est[:-1], dts):
-			vs.append( vmid - 0.5 * acc * dt)
-		vs.append(vmids_raw[-1] + acc_est[-1] * dts[-1])
+		# Handle the final state by just assuming it's the same as the N-1 input for acceleration
+		# and yawrate and extrapolating only the velocity state.
+		yr_est  = np.append(yr_est, [yr_est[-1]])
+		acc_est = np.append(acc_est, acc_est[-1])
+		v_est   = np.append(v_est, v_est[-1] + acc_est[-1] * dts[-1])
 			
-		full_states = np.column_stack((poses, vs, curv_est, acc_est))
+		full_states = np.column_stack((poses, v_est, yr_est, acc_est))
 
 		return full_states
 
@@ -300,7 +272,7 @@ class EKFKinematicFull():
 			# Ignore the initial and final steps of full_states where we have less information about inputs.
 			omegas = []
 			start_index = np.argwhere(tms == 0.)[0][0] # start at the current state (0)
-			end_index   = full_states.shape[0] - 2     # end at the penultimate state (N-1)
+			end_index   = full_states.shape[0] - 3     # end at the state N-2
 			
 			dts = np.diff(tms)
 
@@ -319,67 +291,11 @@ class EKFKinematicFull():
 
 		Q_fit = np.mean(Q_trajs, axis=0)
 		self.Q = Q_fit
-		
+		print(np.diag(self.Q))
+
 		os.makedirs(logdir, exist_ok=True)
 		filename = logdir + 'params.pkl'
 		self.save_weights(filename)
-
-	# Left for debugging purposes of the LS acceleration estimation.
-	# Not used otherwise.
-	"""
-	@staticmethod
-	def get_trajectory(state_init, curvs, accs, dts):
-		trajectory = [ state_init.copy() ] 
-		tms = [0.]
-		for acc, curv, dt in zip(accs, curvs, dts):
-			x, y, t, v = trajectory[-1]
-			
-			vn = v + acc * dt			
-			vbar = 0.5 * (v + vn)			
-
-			tn = t + vbar * curv * dt
-			tbar = 0.5 * (t + tn)
-
-			xn = x + vbar * np.cos( tbar ) * dt
-			yn = y + vbar * np.sin( tbar ) * dt
-
-			trajectory.append([xn, yn, tn, vn])
-			tms.append(tms[-1] + dt)
-
-		trajectory = np.array(trajectory)
-		tms = np.array(tms)
-
-		return tms, trajectory
-
-	def _test_input_profile_estimation(self, train_dataset):		
-		for entry in tqdm(train_dataset):
-			tms, poses  = self.preprocess_entry(entry)
-			full_states = self.state_completion(tms, poses)
-			_, full_states_est = self.get_trajectory(full_states[0, :4], full_states[:, 4], full_states[:, 5], np.diff(tms))
-
-
-			plt.figure(1); plt.clf()
-			plt.plot(full_states[:,0], full_states[:,1], 'r', marker='x')
-			plt.plot(full_states_est[:,0], full_states_est[:,1], 'b', marker='o')
-			plt.axis('equal')
-
-			plt.figure(2); plt.clf()
-			plt.subplot(411)
-			plt.plot(full_states[:, 2], 'r', marker='x')
-			plt.plot(full_states_est[:, 2], 'b', marker='o')
-			plt.ylabel('theta')
-			plt.subplot(412)
-			plt.plot(full_states[:, 3], 'r', marker='x')
-			plt.plot(full_states_est[:, 3], 'b', marker='o')
-			plt.ylabel('v')
-			plt.subplot(413)
-			plt.plot(full_states[:, 4], 'r', marker='x')			
-			plt.ylabel('w')
-			plt.subplot(414)
-			plt.plot(full_states[:, 5], 'r', marker='x')			
-			plt.ylabel('acc')
-			plt.draw(); plt.pause(0.001); 
-	"""				
 
 class EKFKinematicCAH(EKFKinematicFull):
 	''' 5-state Kinematic Extended Kalman Filter Constant Acceleration + Heading Implementation.
@@ -396,9 +312,10 @@ class EKFKinematicCAH(EKFKinematicFull):
 
 	def __init__(self,
 		         z_init=np.zeros(5),
-		         P_init=np.diag(np.square([0.1, 0.1, 0.01, 1., 1.])),
+		         P_init=np.diag(np.square([XY_STD_ERROR, XY_STD_ERROR, ORI_STD_ERROR, \
+		                                   VEL_INIT_ERROR, ACC_INIT_ERROR])),
 		         Q=np.eye(5),
-		         R=np.square([0.1, 0.1, 0.01])):
+		         R=np.square([XY_STD_ERROR, XY_STD_ERROR, ORI_STD_ERROR])):
 		self.nx = 5     # state dimension
 	
 		self.P_init = P_init # state covariance initial value, kept to reset the filter for different tracks.	
@@ -415,69 +332,35 @@ class EKFKinematicCAH(EKFKinematicFull):
 		staten = np.zeros((self.nx), dtype=state.dtype)
 		
 		staten[4] = acc
-		staten[3] = max(v    + acc*dt, 0.)
-		vbar      = max(v    + 0.5*acc*dt, 0.)	
+		staten[3] = max(v    + acc*dt, 0.)		
 		staten[2] = th
-		staten[1] = y    + vbar*np.sin(th)*dt
-		staten[0] = x    + vbar*np.cos(th)*dt
+		staten[1] = y    + v*np.sin(th)*dt
+		staten[0] = x    + v*np.cos(th)*dt
 
 		return staten	
 
 	@staticmethod
-	def state_completion(tms, poses, gamma=1.):
+	def state_completion(tms, poses):
 		""" Estimate the velocity and acceleration profile given a pose trajectory. """
 		dts = np.diff(tms)
 		assert np.all(dts > 1e-3) # make sure dt is positive and not very small
 
 		dposes = np.diff(poses, axis=0)
 
-		displacements     = np.linalg.norm( dposes[:, :2], axis=-1)
-		vmids_raw = displacements / dts
-		num_inputs = len(vmids_raw)
+		""" Step 1: Estimate velocity and acceleration profile. """
+		displacements = np.linalg.norm( dposes[:, :2], axis=-1)
+		v_est = displacements / dts
+		num_inputs = len(v_est)
 
-		# Acceleration estimation with jerk regularization:
-		# We are essentially "inverting" the midpoint integration (get_trajectory)
-		# to get this linear system.
-		# For A_acc, we choose to make acc_0 = acc_1. 
-		# This is done to ensure the linear system is determined.
-		A_acc = np.zeros((num_inputs-1, num_inputs-1))
-		b_acc = np.diff(vmids_raw)	
+		acc_est = np.diff(v_est) / dts[:-1]
+		acc_est = np.append(acc_est, acc_est[-1])
 
-		A_acc[0,0] = 0.5 * (dts[0] + dts[1]) # this is since we chose acc_0 = acc_1.
-		for row in range(1, A_acc.shape[0]):
-			# A_acc is a band matrix with values of dt in the rows after the initial row.		
-			A_acc[row, (row-1):(row+1)] = 0.5 * dts[row:(row+2)]
-
-		# D is simply a difference matrix, meant to get the "delta"-u (input derivative)
-		D = np.eye(num_inputs-1)
-		for x in range(num_inputs-2):
-			D[x, x+1] = -1
-		D = D[:-1, :]
-		
-		R = gamma * D.T @ D # regularization on jerk (i.e. delta-u formulation on acceleration).
-
-		# Solve for acceleration estimates using regularized LS.
-		if np.linalg.det( A_acc.T @ A_acc + R ) < 0.01:
-			print("Near-singular matrix detected.")
-			import pdb; pdb.set_trace()
-		x_acc     = np.linalg.pinv( A_acc.T @ A_acc + R ) @ A_acc.T @ b_acc	
-
-		# Extract acceleration profile, keeping in mind constraint that acc[0] = acc[1].
-		acc_est = [x_acc[0]]
-		acc_est.extend(x_acc)
-
-		# Handle the final state by just assuming it's the same as the N-1 input.
-		# For practical purposes, this doesn't affect the trajectory.
-		acc_est.append(acc_est[-1])
-
-		# We guess the velocity at the time endpoints by taking the midpoint velocities
-		# and using the acceleration estimates.
-		vs = []
-		for vmid, acc, dt in zip(vmids_raw, acc_est[:-1], dts):
-			vs.append( vmid - 0.5 * acc * dt)
-		vs.append(vmids_raw[-1] + acc_est[-1] * dts[-1])
+		# Handle the final state by just assuming it's the same as the N-1 input for acceleration
+		# and extrapolating only the velocity state.		
+		acc_est = np.append(acc_est, acc_est[-1])
+		v_est   = np.append(v_est, v_est[-1] + acc_est[-1] * dts[-1])
 			
-		full_states = np.column_stack((poses, vs, acc_est))
+		full_states = np.column_stack((poses, v_est, acc_est))
 
 		return full_states
 
@@ -495,9 +378,10 @@ class EKFKinematicCVH(EKFKinematicFull):
 
 	def __init__(self,
 		         z_init=np.zeros(4),
-		         P_init=np.diag(np.square([0.1, 0.1, 0.01, 1.])),
+		         P_init=np.diag(np.square([XY_STD_ERROR, XY_STD_ERROR, ORI_STD_ERROR, \
+		                                   VEL_INIT_ERROR])),
 		         Q=np.eye(4),
-		         R=np.square([0.1, 0.1, 0.01])):
+		         R=np.square([XY_STD_ERROR, XY_STD_ERROR, ORI_STD_ERROR])):
 		self.nx = 4     # state dimension
 	
 		self.P_init = P_init # state covariance initial value, kept to reset the filter for different tracks.	
@@ -513,7 +397,7 @@ class EKFKinematicCVH(EKFKinematicFull):
 		
 		staten = np.zeros((self.nx), dtype=state.dtype)
 		
-		staten[3] = np.max(v, 0.)
+		staten[3] = max(v, 0.)
 		staten[2] = th
 		staten[1] = y    + v*np.sin(th)*dt
 		staten[0] = x    + v*np.cos(th)*dt
@@ -521,26 +405,26 @@ class EKFKinematicCVH(EKFKinematicFull):
 		return staten	
 
 	@staticmethod
-	def state_completion(tms, poses, gamma=1.):
+	def state_completion(tms, poses):
 		""" Estimate the velocity profile given a pose trajectory. """
 		dts = np.diff(tms)
 		assert np.all(dts > 1e-3) # make sure dt is positive and not very small
 
 		dposes = np.diff(poses, axis=0)
 
-		displacements     = np.linalg.norm( dposes[:, :2], axis=-1)
-		vmids_raw = displacements / dts
-
-		# Assume velocity is constant in a time interval, so the midpoint
-		# velocity = start velocity for a given interval.
-		vs = [v for v in vmids_raw]
-		vs.append(vmids_raw[-1])
-
-		full_states = np.column_stack((poses, vs))
+		""" Step 1: Estimate velocity and acceleration profile. """
+		displacements = np.linalg.norm( dposes[:, :2], axis=-1)
+		v_est = displacements / dts
+		
+		# Handle the final state by just assuming it's the same as the N-1 input for velocity.
+		v_est   = np.append(v_est, v_est[-1])
+			
+		full_states = np.column_stack((poses, v_est))
 
 		return full_states
 
 if __name__ == '__main__':
 	for mdl in [EKFKinematicFull, EKFKinematicCAH, EKFKinematicCVH]:
+		print( issubclass(mdl, EKFKinematicFull) )
 		m = mdl()
 		print(f"{mdl} with dimension: {m.nx}")
