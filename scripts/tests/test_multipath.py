@@ -2,8 +2,9 @@ import os
 import sys
 import glob
 import numpy as np
-np.random.seed(0)
 import tensorflow as tf
+
+import pytest
 
 scriptdir = os.path.abspath(__file__).split('scripts')[0] + 'scripts/'
 sys.path.append(scriptdir)
@@ -11,7 +12,41 @@ sys.path.append(scriptdir)
 from datasets.tfrecord_utils import _parse_function
 from models.multipath import MultiPath
 
+'''
+Test Fixture Parametrized by Dataset.
+'''
+@pytest.fixture(scope="module", params=['nuscenes', 'l5kit'])
+def multipath_and_dataset(request):
+	repo_path = os.path.abspath(__file__).split('scripts')[0]
+	datadir = repo_path + 'data'
+
+	if request.param == 'nuscenes':
+		num_timesteps = 12
+		num_hist_timesteps = 2
+		anchors = np.load(datadir + '/nuscenes_clusters_16.npy')
+		tfrecords = glob.glob(datadir + '/nuscenes_train_val*.record')
+	elif request.param == 'l5kit':
+		num_timesteps = 25
+		num_hist_timesteps = 5
+		anchors = np.load(datadir + '/l5kit_clusters_16.npy')
+		tfrecords = glob.glob(datadir + '/l5kit_val*.record')
+
+	multipath = MultiPath(num_timesteps=num_timesteps, 
+		                  num_hist_timesteps=num_hist_timesteps,
+		                  anchors=anchors)
+	
+	dataset = tf.data.TFRecordDataset(tfrecords)
+	dataset = dataset.map(_parse_function)
+	dataset = dataset.batch(32)
+
+	return multipath, dataset
+
+'''
+Util Test Functions: Metrics/Loss/Fake Predictions
+'''
 def numpy_ade(anchors, y_true, y_pred):
+	# Returns the average displacement error (ADE) for a batch of data.
+	# Use of Numpy to compare vs. complicted TF logic (e.g. tf.gather_nd).
 	# anchors: num_anchors x num_timesteps x 2
 	# y_true: batch_size x num_timesteps x 2
 	# y_pred: batch_size x (num_anchors x (1 + 5 * num_timesteps))
@@ -39,6 +74,9 @@ def numpy_ade(anchors, y_true, y_pred):
 	return np.mean(ades)
 
 def numpy_nll(anchors, y_true, y_pred):
+	# Returns Negative Log Likelihood Loss for a batch of data.
+	# Implemented in Numpy to compare against complicated TF logic to get the
+	# active trajectories (closest mode).
 	# anchors: num_anchors x num_timesteps x 2
 	# y_true: batch_size x num_timesteps x 2
 	# y_pred: batch_size x (num_anchors x (1 + 5 * num_timesteps))
@@ -59,20 +97,21 @@ def numpy_nll(anchors, y_true, y_pred):
 		active_pred_traj = current_pred[:-num_anchors].reshape(num_anchors, num_timesteps, 5)[active_mode]
 		active_pred_prob = tf.nn.softmax(current_pred[-num_anchors:])[active_mode]
 
-		log_det_loss = 0.
-		mahalanobis_loss = 0.
+		log_det_loss = np.float32(0.)
+		mahalanobis_loss = np.float32(0.)
 
 		for t in range(num_timesteps):
 			mean_xy = active_pred_traj[t, :2] + anchors[active_mode, t, :]
 			residual_xy = y_true[batch_ind, t, :] - mean_xy
-			std_x = np.exp( max(0., active_pred_traj[t, 2]) )
-			std_y = np.exp( max(0., active_pred_traj[t, 3]) )
-			rho   = 0.9*np.tanh(active_pred_traj[t, 4])
-			cov_xy  = np.array([[std_x**2, rho*std_x*std_y], \
-				                [rho*std_x*std_y, std_y**2]])
-
-			log_det_loss += 0.5 * np.log( np.linalg.det(cov_xy) )
-			mahalanobis_loss += 0.5 * residual_xy.T @ np.linalg.inv(cov_xy) @ residual_xy
+			std_x = np.exp( np.abs(active_pred_traj[t, 2]) )
+			std_y = np.exp( np.abs(active_pred_traj[t, 3]) )
+			cos_th = np.cos(active_pred_traj[t, 4])
+			sin_th = np.sin(active_pred_traj[t, 4])
+			R_th   = np.array([[cos_th, -sin_th], 
+				               [sin_th,  cos_th]])
+			cov_xy = R_th @ np.diag([std_x**2, std_y**2]) @ R_th.T
+			log_det_loss += np.float32(0.5) * np.log( np.linalg.det(cov_xy) )
+			mahalanobis_loss += np.float32(0.5) * residual_xy.T @ np.linalg.inv(cov_xy) @ residual_xy
 
 		nll = -np.log(active_pred_prob) + log_det_loss + mahalanobis_loss
 
@@ -81,6 +120,11 @@ def numpy_nll(anchors, y_true, y_pred):
 	return np.mean(neg_log_likelihoods)
 
 def make_correct_mode_predictions(anchors, gt_indices = [0, 5, 10]):
+	# This function makes fake predictions according to the following scheme:
+	# The batch_size is len(gt_indices) and classification error is 0.
+	# The true trajectories are simply the anchors identified by gt_indices.
+	# y_pred is a bunch of random floats, aside from the values given for the 
+	# gt_index which are random mean and fixed covariance parameters.
 	# y_true: batch_size x num_timesteps x 2
 	# y_pred: batch_size x (num_anchors x (1 + 5 * num_timesteps))
 	
@@ -96,97 +140,54 @@ def make_correct_mode_predictions(anchors, gt_indices = [0, 5, 10]):
 		y_pred[batch_ind, -num_anchors:] = [i == gt_anchor for i in range(num_anchors)]
 
 		pred_xy = np.random.rand(*y_true.shape[1:])
-		pred_cov = np.ones((num_timesteps, 3)) * [np.log(1.), np.log(1.), 0.01]
+		pred_cov = np.ones((num_timesteps, 3)) * [np.log(1.), np.log(5.), np.radians(30.)]
 		pred = np.concatenate( (pred_xy, pred_cov), axis=1)
 
-		start = gt_anchor * 5 * num_timesteps
+		start = num_anchors + gt_anchor * 5 * num_timesteps
 		stop  = start + 5 * num_timesteps
-		y_pred[batch_ind, start:stop] = pred.flatten()
+		y_pred[batch_ind, start:stop] = pred.flatten() # Only assign these custom values for the gt_anchor trajectory.
 
 	return y_true.astype(np.float32), y_pred.astype(np.float32)
 
-def test1_single_batch(multipath):
-	tf_ade_metric = multipath.ade()
-	tf_ll_loss = multipath.likelihood_loss()
+'''
+Test Suite
+'''
+def test_fake_predictions(multipath_and_dataset):
+	# Check that ADE / LL match for a set of fake predictions.
+	multipath, _ = multipath_and_dataset
+	tf_ade_metric = multipath.ade_mm()
+	tf_ll_loss = multipath.likelihood_loss_mm()
 	anchors = multipath.anchors.numpy()
 
 	y_true, y_pred = make_correct_mode_predictions(anchors)
-
-	print('Test1: ADE/NLL on selected correct mode predictions.')
+	
 	np_ade = numpy_ade(anchors, y_true, y_pred)
 	np_nll = numpy_nll(anchors, y_true, y_pred)
 
 	tf_ade = tf_ade_metric(y_true, y_pred).numpy()
 	tf_nll = tf_ll_loss(y_true, y_pred).numpy()
 
-	ade_diff = np.abs(np_ade - tf_ade)
-	nll_diff = np.abs(np_nll - tf_nll)
+	assert np.isclose(np_ade, tf_ade) and np.isclose(np_nll, tf_nll)
 
-	print( 'ADE Diff: {}'.format(ade_diff) )
-	print( 'NLL Diff: {}'.format(nll_diff) )
-
-	assert (ade_diff < 1e-6) and (nll_diff < 1e-6)
-
-def test2_full_dataset(multipath, dataset):
-	np_ades = []
-	np_nlls = []
-	tf_ades = []
-	tf_nlls = []
-
+def test_full_dataset(multipath_and_dataset, max_iters=100):
+	# Check that ADE / LL match across max_iters of a tfrecord dataset.
+	multipath, dataset = multipath_and_dataset
 	anchors = multipath.anchors.numpy()
-	tf_ade_metric = multipath.ade()
-	tf_ll_loss = multipath.likelihood_loss()
+	tf_ade_metric = multipath.ade_mm()
+	tf_ll_loss = multipath.likelihood_loss_mm()
 
-	for entry in dataset:
-		img = tf.cast(entry['image'], dtype=tf.float32) / 127.5 - 1.0
-		state = tf.cast( 
-			        tf.concat([entry['velocity'], entry['acceleration'], entry['yaw_rate']], -1),
-			        dtype=tf.float32)
-		future_xy = tf.cast(entry['future_poses_local'][:,:,:2],
-			                dtype=tf.float32)
-		
-		pred = multipath.model.predict_on_batch([img, state])
+	for ind_entry, entry in enumerate(dataset):		
+		img, past_states, future_xy = multipath.preprocess_entry(entry)		
+		pred = multipath.model.predict_on_batch([img, past_states])
 
 		tf_ade = tf_ade_metric(future_xy, pred).numpy()
 		tf_nll = tf_ll_loss(future_xy, pred).numpy()
 
-		tf_ades.append(tf_ade)
-		tf_nlls.append(tf_nll)
-
 		np_ade = numpy_ade(anchors, future_xy.numpy(), pred)
 		np_nll = numpy_nll(anchors, future_xy.numpy(), pred)
 
-		np_ades.append(np_ade)
-		np_nlls.append(np_nll)
+		assert np.isclose(np_ade, tf_ade) and np.isclose(np_nll, tf_nll)
 
-	import matplotlib.pyplot as plt
-	plt.subplot(211)
-	ade_diffs = [x-y for (x,y) in zip(np_ades, tf_ades)]
-	plt.hist( ade_diffs )
-	plt.ylabel('ADE Diff')
-
-	plt.subplot(212)
-	nll_diffs = [x-y for (x,y) in zip(np_nlls, tf_nlls)]
-	plt.hist( nll_diffs )
-	plt.ylabel('NLL Diff')
-
-	print('Difference stats:')
-	print( '\tade_mean: {}, ade_max:{}'.format(np.mean(ade_diffs), np.max(ade_diffs)) )
-	print( '\tnll_mean: {}, nll_max:{}'.format(np.mean(nll_diffs), np.max(nll_diffs)) )
-	plt.show()
-
-	assert (np.mean(ade_diffs) < 1e-3) and (np.mean(nll_diffs) < 1e-3)
-
-if __name__ == '__main__':
-	repo_path = os.path.abspath(__file__).split('scripts')[0]
-	datadir = repo_path + 'data'
-
-	dataset   = glob.glob(datadir + '/nuscenes_train_val*.record')
-	dataset = tf.data.TFRecordDataset(dataset)
-	dataset = dataset.map(_parse_function)
-	dataset = dataset.batch(32)
-
-	m = MultiPath(np.load(datadir + '/nuscenes_clusters_16.npy'))
-	
-	test1_single_batch(m)
-	test2_full_dataset(m, dataset)
+		if max_iters is not None and ind_entry > max_iters:
+			break
+		
