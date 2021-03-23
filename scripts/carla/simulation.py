@@ -21,7 +21,9 @@ from navigation.global_route_planner_dao import GlobalRoutePlannerDAO
 
 import frenet_trajectory_handler as fth
 
-from carla_birdeye_view import BirdViewProducer, BirdViewCropType, PixelDimensions
+from rasterizer.box_rasterizer import BoxRasterizer
+from rasterizer.agent_history import AgentHistory
+from rasterizer.semantic_rasterizer import extract_waypoints_from_topology, RoadEntry, SemanticRasterizer
 
 class VehicleAgent(object):
 	def __init__(self, vehicle, carla_map, is_rational=True):
@@ -32,7 +34,7 @@ class VehicleAgent(object):
 
 		init_waypoint = self.map.get_waypoint(self.vehicle.get_location(), project_to_road=True, lane_type=(carla.LaneType.Driving))
 
-		goals = init_waypoint.next(75.)
+		goals = init_waypoint.next(75.) # TODO: make goal destination programmable rather than hard-coded.
 
 		route = self.planner.trace_route( init_waypoint.transform.location, goals[1].transform.location)
 
@@ -42,7 +44,8 @@ class VehicleAgent(object):
 		self.control_prev = carla.VehicleControl()
 		self.max_steer_angle = np.radians( self.vehicle.get_physics_control().wheels[0].max_steer_angle )
 
-		# Controller params:		
+		# Controller params:	
+		# TODO: more in-depth rational vs. irrational model.	
 		if is_rational:
 			self.alpha = 0.8
 			self.k_v = 0.1
@@ -53,7 +56,6 @@ class VehicleAgent(object):
 			self.k_v = 1.0
 			self.k_ey = 1.0
 			self.x_la = 0.1
-
 
 	def run_step(self, dt):
 		vehicle_loc   = self.vehicle.get_location()
@@ -81,6 +83,7 @@ class VehicleAgent(object):
 			control.brake    = -1.			
 		else:
 			# Step 1: Generate reference by identifying a max speed based on curvature + stoplights.
+			# TODO: update logic, maybe use speed limits from Carla.
 			lat_accel_max = 2.0 # m/s^2
 			speed_limit   = 13.  # m/s -> 29 mph ~ 30 mph
 			
@@ -99,8 +102,6 @@ class VehicleAgent(object):
 			else:
 				control.throttle = 0.1
 				control.brake    = 0.0
-
-			
 
 			if control.throttle > 0.0:
 				control.throttle = self.alpha * control.throttle + (1. - self.alpha) * self.control_prev.throttle
@@ -175,17 +176,24 @@ def run_simulation(args):
 		drone = world.spawn_actor(bp_drone, cam_transform)
 		camera_list.append(drone)
 
-		ego_agent = VehicleAgent(ego_vehicle, world.get_map(), is_rational=True)
-		npc_agent = VehicleAgent(npc_vehicle, world.get_map(), is_rational=False)
+		ego_agent = VehicleAgent(ego_vehicle, world.get_map(), is_rational=True) # TODO: better interface for this.
+		npc_agent = VehicleAgent(npc_vehicle, world.get_map(), is_rational=True)
 
-		birdview_producer = BirdViewProducer(client, target_size=PixelDimensions(width=500, height=500), pixels_per_meter=10, crop_type=BirdViewCropType.FRONT_AND_REAR_AREA)
+		writer = cv2.VideoWriter('output.avi', cv2.VideoWriter_fourcc(*'MJPG'), args.fps, (1460, 500)) # TODO: use argparse to decide whether to log videos or not.  Maybe do this in post-processing from logfile.
 
-		writer = cv2.VideoWriter('output.avi', cv2.VideoWriter_fourcc(*'MJPG'), args.fps, (1460, 500))
+		agent_history = AgentHistory(world.get_actors())
+		box_rasterizer    = BoxRasterizer()
 
-		frames_to_show = 1000
+		set_waypoints = extract_waypoints_from_topology(world.get_map().get_topology())
+		road_entries = [RoadEntry(waypoints) for waypoints in set_waypoints]
+		sem_rasterizer = SemanticRasterizer(road_entries)
+
+		frames_to_show = 500 #TODO: argparse for this.
 		with CarlaSyncMode(world, *camera_list, fps=args.fps) as sync_mode:
 			while frames_to_show > 0:
 				snap, img = sync_mode.tick(timeout=2.0)
+
+				agent_history.update(snap)				
 
 				ego_control = ego_agent.run_step(1 / args.fps)
 				ego_vehicle.apply_control(ego_control)
@@ -199,20 +207,24 @@ def run_simulation(args):
 
 				img_array = cv2.resize(img_array, (960, 500), interpolation = cv2.INTER_AREA)
 
-				birdview = birdview_producer.produce(agent_vehicle=ego_vehicle)
-				rgb = BirdViewProducer.as_rgb(birdview)
-				rgb = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+				# TODO: maybe use raster_common to do the image combination.
+				box_view = box_rasterizer.rasterize(agent_history)
+				sem_view = sem_rasterizer.rasterize(agent_history)
+				mask_box = np.any(box_view > 0, -1)
+				sem_view[mask_box] = box_view[mask_box]
+				img_birdview = sem_view
 				
-				mosaic_array = np.zeros((500, 1460, 3), dtype=rgb.dtype) # H x W x 3
+				mosaic_array = np.zeros((500, 1460, 3), dtype=np.uint8) # H x W x 3
 				mosaic_array[:, :960, :] = img_array
-				mosaic_array[:, 960:, :] = rgb
+				mosaic_array[:, 960:, :] = cv2.cvtColor(img_birdview, cv2.COLOR_RGB2BGR)
 
-				writer.write(mosaic_array)
+				writer.write(mosaic_array) # TODO: clean up saving vs. visualizing.  Add logfile recording.
 				# cv2.imshow('mosaic', mosaic_array)
 				# ret = cv2.waitKey(10)
 
-				time.sleep(0.001)
+				# time.sleep(0.001)
 				frames_to_show -= 1
+				print(frames_to_show)
 
 				# if ret == 27: # Esc
 				# 	break
@@ -228,12 +240,9 @@ def run_simulation(args):
 		cv2.destroyAllWindows()
 		print('Done.')
 
-
-
-
 if __name__ == '__main__':
 	argparser = argparse.ArgumentParser(
-		description='CARLA Synchronous Camera Data Collector')
+		description='CARLA Multi-Vehicle Simulation')
 	argparser.add_argument(
 		'--host',
 		metavar='H',
@@ -254,7 +263,7 @@ if __name__ == '__main__':
 		metavar='PATTERN',
 		default='vehicle.audi.tt')
 	argparser.add_argument( 
-		'--logdir',
+		'--logdir', # TODO: update this, ideally with logfiles.
 		default='data_synced',
 		help='Image logging directory for saved rgb,depth,and semantic segmentation images.')
 	argparser.add_argument( 
