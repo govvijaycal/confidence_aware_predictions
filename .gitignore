@@ -1,4 +1,5 @@
 # Custom additions to below:
+*.pkl
 *curvs.npy
 *lengths.npy
 *.record
