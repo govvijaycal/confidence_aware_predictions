@@ -292,7 +292,18 @@ class MultiPathBase(ABC):
         return predict_dict
 
     def predict_instance(self, image_raw, past_states):
-        raise NotImplementedError
+        if len(image_raw.shape) == 3:
+            image_raw = np.expand_dims(image_raw, 0)
+        img = preprocess_input(tf.cast(image_raw, dtype=tf.float32))
+
+        if len(past_states.shape) == 2:
+            past_states = np.expand_dims(past_states, 0)
+        past_states = tf.cast(past_states, dtype=tf.float32)
+
+        gmm_pred = self.model.predict_on_batch([img, past_states])  # raw prediction tensor
+        gmm_dicts = self._extract_gmm_params(gmm_pred)  # processed prediction as a dict
+
+        return gmm_dicts[0]
 
     def save_weights(self, path):
         path = path if '.h5' in path else (path + '.h5')
