@@ -19,10 +19,13 @@ def convert_world_coords_to_pixels(world_coords, world_to_pixel):
 	return pix_coords[:2, :].T # N_pts by 2 pixels
 
 def angle_to_color(angle):
+	# Converts an angle to a color by interpolating the hue.
+	# The addition of np.pi is arbitrary but meant to match
+	# the nuscenes devkit color scheme.
     angle = angle + np.pi
     angle = np.degrees(angle)
 
-    color = colorsys.hsv_to_rgb( angle/360, 1., 1.)    
+    color = colorsys.hsv_to_rgb( angle/360, 1., 1.)
     color = [int(255 * c) for c in color]
-    
+
     return tuple(color)
