@@ -3,6 +3,8 @@
 *.pkl
 *curvs.npy
 *lengths.npy
+*traj_array.npy
+*stats.npy
 *.record
 *.png
 log/*/
