@@ -11,7 +11,7 @@ from tensorflow.keras.applications import ResNet50
 from tensorflow.keras.applications.resnet import preprocess_input
 from tensorflow.keras.layers import Input, LeakyReLU, Conv2D, Dense, Dropout, LSTM, \
                                     BatchNormalization, Flatten, concatenate, Softmax, \
-                                    AveragePooling2D, UpSampling2D, Cropping2D, ZeroPadding2D
+                                    ReLU, GaussianNoise
 from tensorflow.keras.regularizers import l2
 from tensorflow.keras.optimizers import SGD
 from tensorflow.keras import Model
@@ -19,7 +19,7 @@ from tensorflow.keras.callbacks import TensorBoard
 
 scriptdir = os.path.abspath(__file__).split('scripts')[0] + 'scripts/'
 sys.path.append(scriptdir)
-from datasets.tfrecord_utils import _parse_function, _parse_aug_function
+from datasets.tfrecord_utils import _parse_function
 
 class MultiPathBase(ABC):
     """ Base class for MultiPath variants."""
@@ -78,7 +78,7 @@ class MultiPathBase(ABC):
         raise NotImplementedError
 
     @staticmethod
-    def resnet_backbone(image_input, past_state_input, l2_penalty=1e-2):
+    def resnet_backbone(image_input, past_state_input, l2_penalty=1e-6):
         """ Provides a common ResNet50 backbone to generate
             image/state features for further processing. """
 
@@ -104,35 +104,32 @@ class MultiPathBase(ABC):
         # conv5: 16 x 16 x 2048 (unused)
 
         for layer in base_model.layers:
-            # Freeze all layers except for conv4.
-            if 'conv4' in layer.name:
+            # Freeze all layers except for conv3 and conv4.
+            if 'conv3' in layer.name or 'conv4' in layer.name:
                 layer.trainable = True
             else:
                 layer.trainable = False
 
         x = base_model(image_input)
 
-        for _ in range(2):
-            x = BatchNormalization()(x)
-            x = Conv2D(16, (3, 3),
-                       strides=2,
-                       padding='same',
-                       activation=my_leakyrelu,
-                       kernel_regularizer=l2(l2_penalty),
-                       bias_regularizer=l2(l2_penalty))(x)
-
+        x = Conv2D(8, (1,1),
+                   kernel_regularizer=l2(l2_penalty),
+                   bias_regularizer=l2(l2_penalty))(x)
+        x = ReLU()(x)
         x = Flatten()(x)
 
-        state_input = LSTM(16)(past_state_input)
+        state_input = LSTM(16,
+                           kernel_regularizer=l2(l2_penalty),
+                           bias_regularizer=l2(l2_penalty))(past_state_input)
         y = concatenate([x, state_input])
         y = BatchNormalization()(y)
 
         for _ in range(2):
-            y = Dense(256,
+            y = Dense(512,
                       activation=my_leakyrelu,
                       kernel_regularizer=l2(l2_penalty),
                       bias_regularizer=l2(l2_penalty))(y)
-            y = BatchNormalization()(y)
+            y = Dropout(0.2)(y)
 
         return y
 
@@ -176,7 +173,7 @@ class MultiPathBase(ABC):
         dataset = files.interleave(lambda x: tf.data.TFRecordDataset(x),
                                    cycle_length=2,
                                    block_length=16)
-        dataset = dataset.map(_parse_aug_function)
+        dataset = dataset.map(_parse_function)
         dataset = dataset.shuffle(10 * batch_size,
                                   reshuffle_each_iteration=True)
         dataset = dataset.batch(batch_size)
@@ -243,6 +240,10 @@ class MultiPathBase(ABC):
             cos_arg = np.pi * (epoch % self.lr_period) / self.lr_period
             lr = self.lr_min + 0.5 * (lr_max - self.lr_min) * (1. + np.cos(cos_arg))
             K.set_value(self.model.optimizer.lr, lr)
+
+            # Standard step-wise decay, non-cyclical.
+            # lr = self.lr_max / (1 + self.lr_max_decay * epoch) # lr max decay
+            # K.set_value(self.model.optimizer.lr, lr)
 
         tensorboard.on_train_end(None)
         self.trained = True
