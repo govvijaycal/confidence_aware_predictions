@@ -3,7 +3,6 @@ import sys
 from abc import ABC, abstractmethod
 from tqdm import tqdm
 import numpy as np
-import matplotlib.pyplot as plt
 import pickle
 import tensorflow as tf
 
@@ -17,18 +16,29 @@ def bound_angle_within_pi(angle):
 
 # Note: Based on Fig. 4 of "Synthetic 2D LIDAR for precise vehicle localization in 3D urban environment", ICRA 2013,
 # I am setting a 3sigma bound of 20 cm position error and 1 degree orientation error.
+# I am guessing a reasonable max range of acceleration is +/- 1 g.
+# But less confident about this estimate so use this as a 1-sigma bound.
+# Similar story for velocity (assume 0-20 m/s range) and angular velocity (assume -1 to 1 rad/s range).
 ORI_STD_ERROR   = np.radians(1.) / 3.          # std error of approx. 5.8e-3 radians for yaw angle
 POS_STD_ERROR   = 0.2 / 3.                     # std error of approx. 6.7 cm for position (radius of 1-std error circle)
 XY_STD_ERROR    = POS_STD_ERROR / np.sqrt(2.)  # std error of approx. 4.7 cm error along x or y axis
-VEL_INIT_ERROR  = 1.                           # guesstimate std error (m/s) for initial velocity state
-ACC_INIT_ERROR  = 1.                           # guesstimate std error (m/s^2) for initial acceleration state
-YR_INIT_ERROR   = 0.5                          # guesstimate std error (rad/s) for initial yawrate state
+VEL_INIT_ERROR  = 10.                          # guesstimate std error (m/s) for initial velocity state
+ACC_INIT_ERROR  = 10.                          # guesstimate std error (m/s^2) for initial acceleration state
+YR_INIT_ERROR   = 1.                           # guesstimate std error (rad/s) for initial yawrate state
 
+# Midpoint Guesses for Kinematic State Initialization.
+VEL_INIT_GUESS = 10. # [0, 20] m/s range
+ACC_INIT_GUESS = 0.  # [-10, 10] m/s^2 range
+YR_INIT_GUESS  = 0.  # [-1, 1] rad/s range
 
 class EKFKinematicBase(ABC):
     """ Base Class for Extended Kalman Filter variants.  Contains the
         main time/measurement updates and prediction API, letting children
-        classes provide the custom dynamics models and covariances. """
+        classes provide the custom dynamics models and covariances.
+
+        Reference Notes Used For EM/Smoother: CS287 Lecture 13,
+        https://people.eecs.berkeley.edu/~pabbeel/cs287-fa19/slides/Lec13-KalmanSmoother-MAP-ML-EM.pdf
+        """
 
     ##################### Model Varying  #############################
     ##################################################################
@@ -49,9 +59,10 @@ class EKFKinematicBase(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def state_completion(tms, poses):
-        """ Estimates the full state (relative to that model) given
-            timestamps (tms) and x, y, theta kinematic states (poses).
+    def get_init_state(init_pose):
+        """ Provides an initial state guess given the initial pose.
+            Basically, this just fills in the kinematic state elements
+            with a reasonable guess (with uncertainty captured by self.P_init).
         """
         raise NotImplementedError
 
@@ -76,14 +87,136 @@ class EKFKinematicBase(ABC):
 
     ################### EKF Implementation ###########################
     ##################################################################
+    def filter(self, tms, poses):
+        """ Runs the forward update equations for the EKF.
+
+        Notation: *_tm = estimate after a time update
+                  *_ms = estimate after a measurement update
+        We are lumping the initial state estimate / covariance in the _ms fields.
+        """
+        filter_dict = {}
+        filter_dict['states_tm']         = [] # 1->N
+        filter_dict['covars_tm']         = [] # 1->N
+        filter_dict['A_tm']              = [] # 0->N-1 (taken wrt the state before the time update!)
+        filter_dict['states_ms']         = [] # 0->N
+        filter_dict['covars_ms']         = [] # 0->N
+        filter_dict['residual_ms']       = [] # 1->N
+        filter_dict['residual_covar_ms'] = [] # 1->N
+        filter_dict['residual_log_likelihood'] = 0.
+
+        dts = np.diff(tms)
+
+         # Initial State: Set z_{0 | 0}, P_{0 | 0} and include it as a "measurement" estimate.
+        full_init_state = self.get_init_state(poses[0])
+        self._reset(full_init_state)
+        filter_dict['states_ms'].append(self.z)
+        filter_dict['covars_ms'].append(self.P)
+
+        # Recursions:
+        for dt, next_pose in zip(dts, poses[1:]):
+            z, P, A = self.time_update(dt)
+            filter_dict['states_tm'].append(z)
+            filter_dict['covars_tm'].append(P)
+            filter_dict['A_tm'].append(A)
+
+            z2, P2, res, res_covar = self.measurement_update(next_pose)
+            filter_dict['states_ms'].append(z2)
+            filter_dict['covars_ms'].append(P2)
+            filter_dict['residual_ms'].append(res)
+            filter_dict['residual_covar_ms'].append(res_covar)
+
+        # Compute residual log-likelihood.
+        res_dim = filter_dict['residual_ms'][0].size
+        const_term = res_dim / 2. * np.log(2 * np.pi)
+
+        for res, res_covar in zip(filter_dict['residual_ms'], \
+                                  filter_dict['residual_covar_ms']):
+
+            log_det_term = 1./2. * np.log( np.linalg.det(res_covar) )
+            dist_term    = 1./2. * res.T @ np.linalg.pinv(res_covar) @ res
+
+            filter_dict['residual_log_likelihood'] -= (const_term + log_det_term + dist_term)
+
+        return filter_dict
+
+    @staticmethod
+    def smoother(filter_dict):
+        """ Runs the backward update equations for the RTS Smoother.
+
+        Notation: *_sm = estimate after applying a smoother update
+
+        Unlike the filter, this is a static function so we are not modifying
+        the object properties (i.e., self.z, self.P).
+
+        Note that we are applying the linear KF smoother equations
+        to a nonlinear system, so there is a slight abuse of the assumptions here.
+
+        In particular, the linearization point would really change after
+        smoothening a state estimate, but we are ignoring this for simplicity.
+        This linearization error is exacerbated for the first couple states where the
+        velocity/acceleration/yaw rate are more uncertain.
+
+        See slide 63-64 of https://people.eecs.berkeley.edu/~pabbeel/cs287-fa19/slides/Lec13-KalmanSmoother-MAP-ML-EM.pdf.
+        """
+        smoother_dict = {}
+        smoother_dict['states_sm'] = [] # 0, ..., N; z_{t | 0:N}
+        smoother_dict['covars_sm'] = [] # 0, ..., N; P_{t | 0:N}
+        smoother_dict['L_sm']      = [] # 0, ..., N-1; L_t (smoother gain matrix)
+
+        N = len(filter_dict['A_tm'])
+
+        # Final State: Initialize from z_{N | 0:N}, P_{N | 0:N}.
+        smoother_dict['states_sm'].append(filter_dict['states_ms'][N])
+        smoother_dict['covars_sm'].append(filter_dict['covars_ms'][N])
+
+        for t in range(N-1, -1, -1): # starting from N-1, proceeding to 0
+            z_sm_next = smoother_dict['states_sm'][-1]
+            P_sm_next = smoother_dict['covars_sm'][-1]
+
+            z_ms = filter_dict['states_ms'][t]      # z_{t | 0:t}
+            P_ms = filter_dict['covars_ms'][t]      # P_{t | 0:t}
+
+            z_tm_next = filter_dict['states_tm'][t] # z_{t+1 | 0:t}
+            P_tm_next = filter_dict['covars_tm'][t] # P_{t+1 | 0:t}
+            A         = filter_dict['A_tm'][t]      # A_t
+
+            L = P_ms @ A.T @ np.linalg.pinv(P_tm_next)
+            smoother_residual = z_sm_next - z_tm_next
+            smoother_residual[2] = bound_angle_within_pi(smoother_residual[2])
+
+            z_sm = z_ms + L @ (smoother_residual)
+            z_sm[2] = bound_angle_within_pi(z_sm[2])
+            P_sm = P_ms + L @ (P_sm_next - P_tm_next) @ L.T
+
+            # TODO: REMOVE THIS
+            assert np.allclose(P_sm, P_sm.T)
+
+            smoother_dict['states_sm'].append(z_sm) # z_{t | 0:N}
+            smoother_dict['covars_sm'].append(P_sm) # P_{t | 0:N}
+            smoother_dict['L_sm'].append(L)         # L_t
+
+        # Change the data ordering to be ascending in time index (0, 1, ...).
+        for key in smoother_dict.keys():
+            smoother_dict[key].reverse()
+
+        return smoother_dict
+
     def time_update(self, dt):
         ''' Performs the time/dynamics update step, changing the state estimate (z, P). '''
-        state = np.zeros((self.nx+1))
-        state[:self.nx] = self.z
-        state[-1] = dt
+        state = np.append(self.z, dt)
         self.z = self._dynamics_model(state)
+        self.z[2] = bound_angle_within_pi(self.z[2])
         A      = self._dynamics_jacobian(state)
-        self.P = A @ self.P @ A.T + self.Q * dt**2
+        self.P = A @ self.P @ A.T + self.Q
+
+        # TODO: REMOVE THIS.
+        assert np.allclose(self.P, self.P.T)
+
+        # Return values:
+        # z_{t+1 | 0:t}, state estimate at time t+1 given measurements to t.
+        # P_{t+1 | 0:t}, state covariance at time t+1 given measurements to t.
+        # A_t, linearization about state z at time t.
+        return self.z, self.P, A
 
     def measurement_update(self, measurement):
         ''' Performs the measurement update step, changing the state estimate (z, P).
@@ -97,7 +230,17 @@ class EKFKinematicBase(ABC):
         self.z    = self.z + K @ residual
         self.z[2] = bound_angle_within_pi(self.z[2])
         self.P    = (np.eye(self.nx) - K @ H) @ self.P
-        return residual, res_covar # return for innovation probability calculation
+
+        # TODO: REMOVE THIS
+        assert np.allclose(res_covar, res_covar.T)
+        assert np.allclose(self.P, self.P.T)
+
+        # Return values:
+        # z_{t+1 | 0:t+1}, state estimate at time t+1 given measurements to t+1.
+        # P_{t+1 | 0:t+1}, state covariance at time t+1 given measurements to t+1.
+        # o_{t+1} - H @ z_{t+1: 0:t}, measurement residual (aka innovation) at time t+1.
+        # covariance corresponding to the residual/innovation
+        return self.z, self.P, residual, res_covar
 
     def _reset(self, z_init):
         ''' Resets the initial state estimate for a new track. '''
@@ -113,6 +256,9 @@ class EKFKinematicBase(ABC):
         jac = np.zeros((self.nx, self.nx))
 
         for i in range(self.nx):
+            # nx + 1 here is a bit confusing.  We're including it because
+            # the _dynamics_model needs to know the "dt", so its argument
+            # is of size nx  + 1.
             splus  = state + eps * np.array([int(ind==i) for ind in range(self.nx+1)])
             sminus = state - eps * np.array([int(ind==i) for ind in range(self.nx+1)])
 
@@ -162,26 +308,22 @@ class EKFKinematicBase(ABC):
         dataset = tf.data.TFRecordDataset(dataset)
         dataset = dataset.map(_parse_function)
 
+        import pdb; pdb.set_trace() # TODO: remove this.
         for ind_entry, entry in enumerate(dataset):
             prior_tms, prior_poses, future_tms  = self.preprocess_entry_prediction(entry)
-            prior_dts = np.diff(prior_tms)
 
-            full_prior_states = self.state_completion(prior_tms, prior_poses)
+            # Filter the previous pose history.
+            filter_dict = self.filter(prior_tms, prior_poses)
 
-            self._reset(full_prior_states[0])
-
-            for dt, next_state in zip(prior_dts, full_prior_states[1:]):
-                self.time_update(dt)
-                self.measurement_update(next_state[:3])
-
+            # Predict via extrapolating the motion model.
             future_dts = np.append([future_tms[0]], np.diff(future_tms))
             states = []
             covars = []
 
             for dt in future_dts:
-                self.time_update(dt)
-                states.append(self.z)
-                covars.append(self.P)
+                z, P, _ = self.time_update(dt)
+                states.append(z)
+                covars.append(P)
 
             mode_dict={}
             mode_dict['mode_probability'] = 1.
@@ -207,31 +349,28 @@ class EKFKinematicBase(ABC):
         """ Runs prediction on a single instance for real-time implementation.
             Future times are required to know how many states ahead to predict and at what time interval.
         """
+        import pdb; pdb.set_trace() # TODO: remove this.
         past_states = np.concatenate( (past_states, np.zeros((1,4)).astype(np.float32)), axis=0 ) # Add the zero time/pose.
         prior_tms = past_states[:, 0]
         prior_poses = past_states[:, 1:]
-        prior_dts = np.diff(prior_tms)
 
-        full_prior_states = self.state_completion(prior_tms, prior_poses)
-        self._reset(full_prior_states[0])
+        # Filter the previous pose history.
+        filter_dict = self.filter(prior_tms, prior_poses)
 
-        for dt, next_state in zip(prior_dts, full_prior_states[1:]):
-            self.time_update(dt)
-            self.measurement_update(next_state[:3])
+        # Predict via extrapolating the motion model.
+        future_dts = np.append([future_tms[0]], np.diff(future_tms))
+        states = []
+        covars = []
 
-            future_dts = np.append([future_tms[0]], np.diff(future_tms))
-            states = []
-            covars = []
+        for dt in future_dts:
+            z, P, _ = self.time_update(dt)
+            states.append(z)
+            covars.append(P)
 
-            for dt in future_dts:
-                self.time_update(dt)
-                states.append(self.z)
-                covars.append(self.P)
-
-            mode_dict={}
-            mode_dict['mode_probability'] = 1.
-            mode_dict['mus'] = np.array([state[:2] for state in states])
-            mode_dict['sigmas'] = np.array([covar[:2, :2] for covar in covars])
+        mode_dict={}
+        mode_dict['mode_probability'] = 1.
+        mode_dict['mus'] = np.array([state[:2] for state in states])
+        mode_dict['sigmas'] = np.array([covar[:2, :2] for covar in covars])
 
         gmm_pred = {0: mode_dict}
 
@@ -256,45 +395,170 @@ class EKFKinematicBase(ABC):
 
     def fit(self, train_set, val_set, logdir=None, **kwargs):
         """ Identifies Q covariance matrix from the data.
-            This just identifies the covariances from the 1-step prediction residuals.
+
+        We use a EM algorithm on the smoothed state estimates.
+        We assume the linearization error is not too large so the EM procedure for linear KFs can be applied.
+
+        Essentially, run filter/smoother to get smoothed state estimates.
+        Then find the Q_MLE in terms of the smoothed estimates, do a "coarse" backtracking line search
+        with the residual log likelihood to choose the next Q.
+
+        Note we cache the training set (only the trajectories) so
+        the tfrecord files only need to be read one time.
         """
+
+        # A tfrecord dataset, used only in the first function call
+        # of evaluate_candidate_Q.  We explicitly del this
+        # after caching, so we don't need to maintain the TFRecordDataset
+        # in memory.
         train_dataset = tf.data.TFRecordDataset(train_set)
         train_dataset = train_dataset.map(_parse_function)
-        Q_trajs = []
 
-        for ind_entry, entry in tqdm(enumerate(train_dataset)):
-            tms, poses  = self.preprocess_entry(entry)
-            full_states = self.state_completion(tms, poses)
+        # A numpy array we'll build in the first iteration.  This is a
+        # cached version of the trajectories in train_dataset, used
+        # for subsequent function calls of evaluate_candidate_Q.
+        cached_train_dataset = []
 
-            # Estimate the disturbance covariance for this trajectory.
-            # Ignore the final states which are extrapolated since we have partial pose data.
-            omegas = []
-            start_index = 0
-            end_index   = full_states.shape[0] - 2 # cut off at at the end to avoid the extrapolated states (e.g. accel).
+        def evaluate_candidate_Q(Q_candidate, get_MLE = True):
+            # This inner function simply uses the current Q_candidate to run the KF filter and smoother,
+            # allowing us to (1) compute residual_log_likelihood at Q_candidate and (2) get a MLE guess
+            # of the next Q to try out (if get_MLE = True).
 
-            dts = np.diff(tms)
+            self.Q = Q_candidate # Set the KF's Q matrix to our Q_candidate.
 
-            for ind in range(start_index, end_index):
-                state_curr = full_states[ind]
-                state_next = full_states[ind+1]
-                dt = dts[ind]
+            Q_mle_trajs  = [] # Stores the fitted Q_MLE for a single trajectory (dataset instance)
+            loglik_trajs = [] # Stores the residual log likelihood for a single trajectory (dataset instance).
 
-                state_next_est = self._dynamics_model(np.append(state_curr, dt))
+            # We access the datasets from the outer scope.
+            nonlocal cached_train_dataset
+            if len(cached_train_dataset) == 0: # this time, make the cache dataset
+                nonlocal train_dataset
+                generate_cache_dataset = True
+                dataset = train_dataset
+            else:                              # this time, used the cache dataset
+                generate_cache_dataset = False
+                dataset = cached_train_dataset
 
-                # We divide by dt here since we assume a w_k * dt term
-                # appears in the dynamics function.
-                omega = (state_next - state_next_est) / dt
-                omegas.append(omega)
-            Q_trajs.append( np.mean([np.outer(w, w) for w in omegas], axis=0) )
+            for ind_entry, entry in tqdm(enumerate(dataset)):
+                if generate_cache_dataset:
+                    # Incrementally add the tfrecord processed entries to a cached dataset.
+                    tms, poses  = self.preprocess_entry(entry)
+                    cached_train_dataset.append(np.column_stack((tms, poses)))
+                else:
+                    # Just access the entry from the cached (numpy) dataset.
+                    tms = entry[:, 0]
+                    poses = entry[:, 1:]
 
-        Q_fit = np.mean(Q_trajs, axis=0)
-        self.Q = Q_fit
-        print(np.diag(self.Q))
+                dts = np.diff(tms)
+                filter_dict   = self.filter(tms, poses)
+
+                # Note down log likelihood of the current Q_candidate.
+                loglik_trajs.append( filter_dict['residual_log_likelihood'] )
+
+                if get_MLE:
+                    smoother_dict = self.smoother(filter_dict)
+
+                    # Compute update term for Q_MLE:
+                    N = len(filter_dict['A_tm'])
+                    Q_MLE = np.zeros_like(self.Q)
+
+                    for t in range(N): # 0, ..., N-1
+                        A         = filter_dict['A_tm'][t]           # A_t
+                        L         = smoother_dict['L_sm'][t]         # L_t
+
+                        z_sm      = smoother_dict['states_sm'][t+1]  # z_{t+1 | 0:N}
+                        P_sm      = smoother_dict['covars_sm'][t+1]  # P_{t+1 | 0:N}
+
+                        z_sm_prev = smoother_dict['states_sm'][t]    # z_{t | 0:N}
+                        P_sm_prev = smoother_dict['covars_sm'][t]    # P_{t | 0:N}
+
+                        dt = dts[t] # not the greatest notation, but means time interval betweeen t and t+1 timestamps
+
+                        res_model = z_sm - self._dynamics_model( np.append(z_sm_prev, dt) )
+                        res_model[2] = bound_angle_within_pi(res_model[2])
+
+                        Q_MLE += 1./N * (res_model @ res_model.T + \
+                                         A @ P_sm_prev @ A.T + P_sm - \
+                                         P_sm @ L.T @ A.T - A @ L @ P_sm)
+
+                    Q_mle_trajs.append( Q_MLE )
+
+            if generate_cache_dataset:
+                # Convert the cached dataset from a list to numpy array.
+                # Free the memory occupied by the TFRecord Dataset.
+                cached_train_dataset = np.array(cached_train_dataset)
+                del train_dataset
+
+            loglik = np.mean(loglik_trajs)
+
+            if not get_MLE:
+                return loglik
+            else:
+                Q_MLE  = np.mean(Q_mle_trajs, axis=0)
+
+                # TODO: Remove this later, for debugging.
+                assert np.allclose(Q_MLE, Q_MLE.T)
+
+                return loglik, Q_MLE
+
+        # EM algorithm implementation follows.
+        Q_by_iter       = [self.Q]
+        log_lik_by_iter = []
+
+        max_iters = 10
+        frob_norm_eps = 1e-2
+
+        print('Starting EM Fit:')
+        for em_iter in range(max_iters):
+            Q_current = Q_by_iter[-1]
+
+            print(f"\n\tEM Q Fit: Iter {em_iter+1} of {max_iters}")
+            print(f"\t{np.diag(Q_current)}")
+
+            loglik, Q_MLE = evaluate_candidate_Q(Q_current, get_MLE = True)
+            log_lik_by_iter.append(loglik)
+
+            print(f"\tLL: {loglik}")
+
+            # Decision point: converged, continue, or do a line search?
+            if np.linalg.norm(Q_current - Q_MLE, ord='fro') < frob_norm_eps:
+                # If the new Q "guess" is sufficiently close to the current Q guess,
+                # no point doing a line search update.  Just use the current Q guess.
+                break
+
+            # A very simplified/coarse attempt at backtracking line search to handle cases
+            # where Q_MLE is not actually improving the residual log-likelihood.
+            # Essentially, using Q_MLE as a "descent direction" guide and choosing
+            # a stepsize from a set of options, rather than computing the stepsize.
+            improved_LL = False
+            for s in [0., 0.25, 0.5, 0.75]:
+                Q_test  = s * Q_current + (1. - s) * Q_MLE # Note s starts from 0, so we first try Q_MLE.
+                ll_test = evaluate_candidate_Q(Q_test, get_MLE = False)
+                # TODO: for very large datasets, we may opt to only evaluate
+                # residual log likelhood on a subsample to speed this up.
+
+                if ll_test > loglik:
+                    # Could find a better direction to proceed. Proceed to next iter of EM.
+                    improved_LL = True
+                    Q_by_iter.append(Q_test)
+                    break
+
+            if not improved_LL:
+                break # Could not find a better direction to proceed.  Terminate early.
+
+        # Use the final Q matrix as the fitted result.
+
+        print('EM Fit Results: ')
+        Q_final = Q_by_iter[-1]
+        print(f"\t{np.diag(Q_final)}")
+        loglik_final = evaluate_candidate_Q(Q_final, get_MLE = False)
+        print(f"\tLL: {loglik_final}")
+
+        self.Q = Q_final
 
         os.makedirs(logdir, exist_ok=True)
         filename = logdir + 'params.pkl'
         self.save_weights(filename)
-
 
 ##################################################################
 ################ Full Order EKF with 6 states ####################
@@ -318,7 +582,7 @@ class EKFKinematicCATR(EKFKinematicBase):
                  P_init=np.diag(np.square([XY_STD_ERROR, XY_STD_ERROR, ORI_STD_ERROR, \
                                            VEL_INIT_ERROR, YR_INIT_ERROR, ACC_INIT_ERROR])),
                  Q=np.eye(6),
-                 R=np.square([XY_STD_ERROR, XY_STD_ERROR, ORI_STD_ERROR])):
+                 R=np.diag(np.square([XY_STD_ERROR, XY_STD_ERROR, ORI_STD_ERROR]))):
 
         self.nx = 6     # state dimension
 
@@ -345,31 +609,9 @@ class EKFKinematicCATR(EKFKinematicBase):
         return staten
 
     @staticmethod
-    def state_completion(tms, poses):
-        dts = np.diff(tms)
-        assert np.all(dts > 1e-3) # make sure dt is positive and not very small
-
-        dposes = np.diff(poses, axis=0)
-
-        # Estimate velocity and acceleration profile.
-        displacements     = np.linalg.norm( dposes[:, :2], axis=-1)
-        v_est = displacements / dts
-
-        acc_est = np.diff(v_est) / dts[:-1]
-        acc_est = np.append(acc_est, acc_est[-1])
-
-        # Estimate yawrate profile.
-        ang_displacements = dposes[:,2]
-        yr_est = ang_displacements / dts
-
-        # Extrapolate final state.
-        yr_est  = np.append(yr_est, [yr_est[-1]])
-        acc_est = np.append(acc_est, acc_est[-1])
-        v_est   = np.append(v_est, v_est[-1] + acc_est[-1] * dts[-1])
-
-        full_states = np.column_stack((poses, v_est, yr_est, acc_est))
-
-        return full_states
+    def get_init_state(init_pose):
+        x_init, y_init, th_init = init_pose
+        return np.array([x_init, y_init, th_init, VEL_INIT_GUESS, YR_INIT_GUESS, ACC_INIT_GUESS])
 
 
 ##################################################################
@@ -393,7 +635,7 @@ class EKFKinematicCAH(EKFKinematicBase):
                  P_init=np.diag(np.square([XY_STD_ERROR, XY_STD_ERROR, ORI_STD_ERROR, \
                                            VEL_INIT_ERROR, ACC_INIT_ERROR])),
                  Q=np.eye(5),
-                 R=np.square([XY_STD_ERROR, XY_STD_ERROR, ORI_STD_ERROR])):
+                 R=np.diag(np.square([XY_STD_ERROR, XY_STD_ERROR, ORI_STD_ERROR]))):
         self.nx = 5     # state dimension
 
         self.P_init = P_init # state covariance initial value, kept to reset the filter for different tracks.
@@ -418,27 +660,9 @@ class EKFKinematicCAH(EKFKinematicBase):
         return staten
 
     @staticmethod
-    def state_completion(tms, poses):
-        dts = np.diff(tms)
-        assert np.all(dts > 1e-3) # make sure dt is positive and not very small
-
-        dposes = np.diff(poses, axis=0)
-
-        # Estimate velocity and acceleration profile.
-        displacements = np.linalg.norm( dposes[:, :2], axis=-1)
-        v_est = displacements / dts
-        num_inputs = len(v_est)
-
-        acc_est = np.diff(v_est) / dts[:-1]
-        acc_est = np.append(acc_est, acc_est[-1])
-
-        # Extrapolate for the final state.
-        acc_est = np.append(acc_est, acc_est[-1])
-        v_est   = np.append(v_est, v_est[-1] + acc_est[-1] * dts[-1])
-
-        full_states = np.column_stack((poses, v_est, acc_est))
-
-        return full_states
+    def get_init_state(init_pose):
+        x_init, y_init, th_init = init_pose
+        return np.array([x_init, y_init, th_init, VEL_INIT_GUESS, ACC_INIT_GUESS])
 
 
 ##################################################################
@@ -462,7 +686,7 @@ class EKFKinematicCVTR(EKFKinematicBase):
                  P_init=np.diag(np.square([XY_STD_ERROR, XY_STD_ERROR, ORI_STD_ERROR, \
                                            VEL_INIT_ERROR, YR_INIT_ERROR])),
                  Q=np.eye(5),
-                 R=np.square([XY_STD_ERROR, XY_STD_ERROR, ORI_STD_ERROR])):
+                 R=np.diag(np.square([XY_STD_ERROR, XY_STD_ERROR, ORI_STD_ERROR]))):
         self.nx = 5     # state dimension
 
         self.P_init = P_init # state covariance initial value, kept to reset the filter for different tracks.
@@ -487,26 +711,9 @@ class EKFKinematicCVTR(EKFKinematicBase):
         return staten
 
     @staticmethod
-    def state_completion(tms, poses):
-        dts = np.diff(tms)
-        assert np.all(dts > 1e-3) # make sure dt is positive and not very small
-
-        dposes = np.diff(poses, axis=0)
-
-        # Estimate velocity and yawrate profile.
-        displacements = np.linalg.norm( dposes[:, :2], axis=-1)
-        v_est = displacements / dts
-
-        ang_displacements = dposes[:,2]
-        yr_est = ang_displacements / dts
-
-        # Extrapolate for the final state.
-        v_est   = np.append(v_est, v_est[-1])
-        yr_est  = np.append(yr_est, yr_est[-1])
-
-        full_states = np.column_stack((poses, v_est, yr_est))
-
-        return full_states
+    def get_init_state(init_pose):
+        x_init, y_init, th_init = init_pose
+        return np.array([x_init, y_init, th_init, VEL_INIT_GUESS, YR_INIT_GUESS])
 
 
 ##################################################################
@@ -529,7 +736,7 @@ class EKFKinematicCVH(EKFKinematicBase):
                  P_init=np.diag(np.square([XY_STD_ERROR, XY_STD_ERROR, ORI_STD_ERROR, \
                                            VEL_INIT_ERROR])),
                  Q=np.eye(4),
-                 R=np.square([XY_STD_ERROR, XY_STD_ERROR, ORI_STD_ERROR])):
+                 R=np.diag(np.square([XY_STD_ERROR, XY_STD_ERROR, ORI_STD_ERROR]))):
         self.nx = 4     # state dimension
 
         self.P_init = P_init # state covariance initial value, kept to reset the filter for different tracks.
@@ -553,26 +760,18 @@ class EKFKinematicCVH(EKFKinematicBase):
         return staten
 
     @staticmethod
-    def state_completion(tms, poses):
-        dts = np.diff(tms)
-        assert np.all(dts > 1e-3) # make sure dt is positive and not very small
-
-        dposes = np.diff(poses, axis=0)
-
-        # Estimate velocity profile.
-        displacements = np.linalg.norm( dposes[:, :2], axis=-1)
-        v_est = displacements / dts
-
-        # Extrapolate for the final state.
-        v_est   = np.append(v_est, v_est[-1])
-
-        full_states = np.column_stack((poses, v_est))
-
-        return full_states
+    def get_init_state(init_pose):
+        x_init, y_init, th_init = init_pose
+        return np.array([x_init, y_init, th_init, VEL_INIT_GUESS])
 
 
 if __name__ == '__main__':
+    test_pose = np.array([1.0, 0.1, -0.001])
     for mdl in [EKFKinematicCATR, EKFKinematicCAH, EKFKinematicCVTR, EKFKinematicCVH]:
         print( issubclass(mdl, EKFKinematicBase) )
         m = mdl()
         print(f"{mdl} with dimension: {m.nx}")
+        print(f"Init state for this model:\n{m.get_init_state(test_pose)}")
+        print(f"Init covar for this model:\n{m.P_init}")
+        print(f"Dist covar for this model:\n{m.Q}")
+        print(f"Meas covar for this model:\n{m.R}\n")
