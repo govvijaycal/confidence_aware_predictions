@@ -8,7 +8,7 @@ import tensorflow as tf
 
 scriptdir = os.path.abspath(__file__).split('scripts')[0] + 'scripts/'
 sys.path.append(scriptdir)
-from datasets.tfrecord_utils import _parse_function
+from datasets.tfrecord_utils import _parse_no_img_function
 
 def bound_angle_within_pi(angle):
     # Refer to https://stackoverflow.com/questions/15927755/opposite-of-numpy-unwrap
@@ -19,7 +19,7 @@ def bound_angle_within_pi(angle):
 # I am guessing a reasonable max range of acceleration is +/- 1 g.
 # But less confident about this estimate so use this as a 1-sigma bound.
 # Similar story for velocity (assume 0-20 m/s range) and angular velocity (assume -1 to 1 rad/s range).
-ORI_STD_ERROR   = np.radians(1.) / 3.          # std error of approx. 5.8e-3 radians for yaw angle
+ORI_STD_ERROR   = np.radians(10.) / 3.         # std error of approx. 5.8e-2 radians for yaw angle
 POS_STD_ERROR   = 0.2 / 3.                     # std error of approx. 6.7 cm for position (radius of 1-std error circle)
 XY_STD_ERROR    = POS_STD_ERROR / np.sqrt(2.)  # std error of approx. 4.7 cm error along x or y axis
 VEL_INIT_ERROR  = 10.                          # guesstimate std error (m/s) for initial velocity state
@@ -306,7 +306,7 @@ class EKFKinematicBase(ABC):
         predict_dict = {}
 
         dataset = tf.data.TFRecordDataset(dataset)
-        dataset = dataset.map(_parse_function)
+        dataset = dataset.map(_parse_no_img_function)
 
         import pdb; pdb.set_trace() # TODO: remove this.
         for ind_entry, entry in enumerate(dataset):
@@ -402,22 +402,28 @@ class EKFKinematicBase(ABC):
         Essentially, run filter/smoother to get smoothed state estimates.
         Then find the Q_MLE in terms of the smoothed estimates, do a "coarse" backtracking line search
         with the residual log likelihood to choose the next Q.
-
-        Note we cache the training set (only the trajectories) so
-        the tfrecord files only need to be read one time.
         """
 
-        # A tfrecord dataset, used only in the first function call
-        # of evaluate_candidate_Q.  We explicitly del this
-        # after caching, so we don't need to maintain the TFRecordDataset
-        # in memory.
-        train_dataset = tf.data.TFRecordDataset(train_set)
-        train_dataset = train_dataset.map(_parse_function)
+        # First check if we need to make a cached_train_dataset (numpy array)
+        # from tfrecords.  If so, then use the tf.data pipeline for the first
+        # call to evaluate_candidate_Q and stick with numpy array after that.
+        train_dataset, cached_train_dataset = None, None
+        if type(train_set) == np.ndarray:
+            # Already a cached numpy array, use it as is.  No extra work
+            # to be done in the first call of evaluate_candidate_Q.
+            cached_train_dataset = train_set
+            del train_dataset
+        else:
+            # A tfrecord dataset, used only in the first function call
+            # of evaluate_candidate_Q.  We explicitly del this
+            # after caching, so we don't need to use the TFRecordDataset.
+            train_dataset = tf.data.TFRecordDataset(train_set)
+            train_dataset = train_dataset.map(_parse_no_img_function)
 
-        # A numpy array we'll build in the first iteration.  This is a
-        # cached version of the trajectories in train_dataset, used
-        # for subsequent function calls of evaluate_candidate_Q.
-        cached_train_dataset = []
+            # A numpy array we'll build.  This is a cached version of
+            # the trajectories in train_dataset, used for subsequent
+            # function calls of evaluate_candidate_Q.
+            cached_train_dataset = []
 
         def evaluate_candidate_Q(Q_candidate, get_MLE = True):
             # This inner function simply uses the current Q_candidate to run the KF filter and smoother,
@@ -431,11 +437,13 @@ class EKFKinematicBase(ABC):
 
             # We access the datasets from the outer scope.
             nonlocal cached_train_dataset
-            if len(cached_train_dataset) == 0: # this time, make the cache dataset
+            if len(cached_train_dataset) == 0:
+                # this time, make the cache dataset
                 nonlocal train_dataset
                 generate_cache_dataset = True
                 dataset = train_dataset
-            else:                              # this time, used the cache dataset
+            else:
+                # this time, use the cache dataset
                 generate_cache_dataset = False
                 dataset = cached_train_dataset
 
@@ -556,9 +564,10 @@ class EKFKinematicBase(ABC):
 
         self.Q = Q_final
 
-        os.makedirs(logdir, exist_ok=True)
-        filename = logdir + 'params.pkl'
-        self.save_weights(filename)
+        if logdir is not None:
+            os.makedirs(logdir, exist_ok=True)
+            filename = logdir + 'params.pkl'
+            self.save_weights(filename)
 
 ##################################################################
 ################ Full Order EKF with 6 states ####################
