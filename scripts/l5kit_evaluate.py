@@ -9,41 +9,31 @@ from tqdm import tqdm
 
 from models.regression import Regression
 from models.multipath import MultiPath
-from models.ekf import EKFKinematicFull, EKFKinematicCAH, EKFKinematicCVH
+from models.ekf import EKFKinematicBase, EKFKinematicCATR, EKFKinematicCAH, \
+                       EKFKinematicCVTR, EKFKinematicCVH
+from models.static_multiple_model import StaticMultipleModel
 from datasets.splits import L5KIT_TRAIN, L5KIT_VAL
 from evaluation.gmm_prediction import GMMPrediction
-
-"""
-TODO: modes -> predict, evaluate, visualize.
-Prediction Code.  Pandas dataframe analysis + metrics reporting.
-ID examples to plot and plot it (aka MultiPath, Fig 3)
-Wrap up EKF impl. and plan out IMM impl process.
-Plan out MultiPath Dynamic impl.
-Closed-loop eval: Carla + val set resimulation.
-"""
-
 
 if __name__ == '__main__':
 	repo_path = os.path.abspath(__file__).split('scripts')[0]
 
+	# TODO: clean up interface, argparse, etc.
 	mode = "visualize" #"predict", "evaluate", "visualize"
-	
+
 	# Full list of experiments for reference.  Can pick a subset to run on.
 	name_model_weight_list = []
-	name_model_weight_list.append(['l5kit_regression_lstm', Regression, '00040_epochs.h5'])
-	name_model_weight_list.append(['l5kit_multipath_lstm', MultiPath, '00080_epochs.h5'])
-	name_model_weight_list.append(['l5kit_ekf', EKFKinematicFull, 'params.pkl'])
-	name_model_weight_list.append(['l5kit_ekf_cah', EKFKinematicCAH, 'params.pkl'])
-	name_model_weight_list.append(['l5kit_ekf_cvh', EKFKinematicCVH, 'params.pkl'])
+	# TODO: update name_model_weight_list.
+	raise NotImplementedError("Need to fill this in with updated values.")
 
 	l5kit_anchors = np.load(repo_path + 'data/l5kit_clusters_16.npy')
 	l5kit_weights = np.load(repo_path + 'data/l5kit_clusters_16_weights.npy')
-	
+
 	if mode == 'predict':
 		for name_model_weight in name_model_weight_list:
 			name, model, weight = name_model_weight
 			# Construct the model.
-			if issubclass(model, EKFKinematicFull):
+			if issubclass(model, EKFKinematicBase) or model == StaticMultipleModel:
 				m = model()
 				epoch_label = name.split('_')[-1]
 			elif model == Regression:
@@ -55,19 +45,19 @@ if __name__ == '__main__':
 				epoch_label = weight.split('_')[0]
 			else:
 				raise ValueError(f"Invalid model: {model}")
-			
+
 			logdir = f"{repo_path}log/{name}/"
 
 			m.load_weights(f"{logdir}{weight}")
 
 			predict_dict = m.predict(L5KIT_VAL)
-			
+
 			pkl_name = f"{repo_path}log/{name}/predictions_{epoch_label}.pkl"
 			pickle.dump( predict_dict, open(pkl_name, "wb") )
 
-	elif mode == 'evaluate':		
+	elif mode == 'evaluate':
 		data_list = []
-		ks_eval = [1, 3, 5]		
+		ks_eval = [1, 3, 5]
 
 		columns   = ["sample", "instance", "model"]
 		columns.extend([f"traj_LL_{k}" for k in ks_eval])
@@ -78,7 +68,7 @@ if __name__ == '__main__':
 
 		for name_model_weight in name_model_weight_list:
 			name, _, weight = name_model_weight
-			
+
 			if 'ekf' in name:
 				epoch_label = name.split('_')[-1]
 			else:
@@ -93,7 +83,7 @@ if __name__ == '__main__':
 			for key in tqdm(predict_dict.keys()):
 				future_traj_gt = predict_dict[key]['future_traj']
 				future_xy_gt = future_traj_gt[:, 1:3]
-				gmm_pred       = predict_dict[key]['gmm_pred']				
+				gmm_pred       = predict_dict[key]['gmm_pred']
 
 				n_modes     = len(gmm_pred.keys())
 				n_timesteps = future_traj_gt.shape[0]
@@ -102,10 +92,10 @@ if __name__ == '__main__':
 				sigmas             = np.array( [gmm_pred[mode]['sigmas'] for mode in range(n_modes)] )
 
 				gmm_pred     = GMMPrediction(n_modes, n_timesteps, mode_probabilities, mus, sigmas)
-				
+
 				sample_token   = '_'.join( key.split('_')[:-2] )
 				instance_token = '_'.join( key.split('_')[-2:] )
-				
+
 				data_list_entry = [sample_token, instance_token, model_name]
 				if n_modes == 1:
 					num_ks = len(ks_eval)
@@ -127,13 +117,13 @@ if __name__ == '__main__':
 					data_list_entry.extend([gmm_pred_k.compute_minmax_d(future_xy_gt) \
 					                        for gmm_pred_k in gmm_pred_ks])
 
-				data_list.append(data_list_entry)	
-		metrics_df = pd.DataFrame(data_list, columns=columns)	
+				data_list.append(data_list_entry)
+		metrics_df = pd.DataFrame(data_list, columns=columns)
 		metrics_df.to_pickle(f"{repo_path}l5kit_metrics_df.pkl")
-		
+
 	elif mode == 'visualize':
 		metrics_df = pd.read_pickle(f"{repo_path}l5kit_metrics_df.pkl")
-		
+
 		model_names = set(metrics_df.model)
 
 		ks_eval = [1, 3, 5]
