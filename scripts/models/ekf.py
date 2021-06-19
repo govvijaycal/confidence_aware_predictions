@@ -9,10 +9,7 @@ import tensorflow as tf
 scriptdir = os.path.abspath(__file__).split('scripts')[0] + 'scripts/'
 sys.path.append(scriptdir)
 from datasets.tfrecord_utils import _parse_no_img_function
-
-def bound_angle_within_pi(angle):
-    # Refer to https://stackoverflow.com/questions/15927755/opposite-of-numpy-unwrap
-    return (angle + np.pi) % (2.0 * np.pi) - np.pi
+from datasets.pose_utils import angle_mod_2pi as bound_angle_within_pi
 
 # Note: Based on Fig. 4 of "Synthetic 2D LIDAR for precise vehicle localization in 3D urban environment", ICRA 2013,
 # I am setting a 3sigma bound of 20 cm position error and 1 degree orientation error.
@@ -308,8 +305,7 @@ class EKFKinematicBase(ABC):
         dataset = tf.data.TFRecordDataset(dataset)
         dataset = dataset.map(_parse_no_img_function)
 
-        import pdb; pdb.set_trace() # TODO: remove this.
-        for ind_entry, entry in enumerate(dataset):
+        for entry in tqdm(dataset):
             prior_tms, prior_poses, future_tms  = self.preprocess_entry_prediction(entry)
 
             # Filter the previous pose history.
@@ -447,7 +443,7 @@ class EKFKinematicBase(ABC):
                 generate_cache_dataset = False
                 dataset = cached_train_dataset
 
-            for ind_entry, entry in tqdm(enumerate(dataset)):
+            for entry in tqdm(dataset):
                 if generate_cache_dataset:
                     # Incrementally add the tfrecord processed entries to a cached dataset.
                     tms, poses  = self.preprocess_entry(entry)

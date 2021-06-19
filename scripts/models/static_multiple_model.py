@@ -1,6 +1,5 @@
 import os
 import sys
-from abc import ABC, abstractmethod
 from tqdm import tqdm
 import numpy as np
 import pickle
@@ -9,8 +8,9 @@ import tensorflow as tf
 scriptdir = os.path.abspath(__file__).split('scripts')[0] + 'scripts/'
 sys.path.append(scriptdir)
 from datasets.tfrecord_utils import _parse_no_img_function
+from datasets.pose_utils import angle_mod_2pi as bound_angle_within_pi
 
-from models.ekf import bound_angle_within_pi, EKFKinematicBase, \
+from models.ekf import EKFKinematicBase, \
                        EKFKinematicCATR, EKFKinematicCAH, \
                        EKFKinematicCVTR, EKFKinematicCVH
 
@@ -61,9 +61,9 @@ class StaticMultipleModel():
             if filt_name not in model_dict.keys():
                 raise ValueError(f"Could not find the saved EKF model for {filt_name}")
 
-            filt.P_init = model[filt_name]['P']
-            filt.Q      = model[filt_name]['Q']
-            filt.R      = model[filt_name]['R']
+            filt.P_init = model_dict[filt_name]['P']
+            filt.Q      = model_dict[filt_name]['Q']
+            filt.R      = model_dict[filt_name]['R']
 
     ##################### Prediction  ################################
     ##################################################################
@@ -72,7 +72,6 @@ class StaticMultipleModel():
         res   = filter_dict['residual_ms'][t]
         covar = filter_dict['residual_covar_ms'][t]
 
-        # Approach: compute the log-likelihood and then exponentiate the result.
         const_term = res.size / 2. * np.log(2 * np.pi)
         log_det_term = 1./2. * np.log( np.linalg.det(covar) )
         dist_term    = 1./2. * res.T @ np.linalg.pinv(covar) @ res
@@ -98,10 +97,11 @@ class StaticMultipleModel():
             assert np.all( mode_probs >= 0.)
             assert np.all( mode_probs <= 1.)
 
-            rls = np.array([compute_residual_log_likelihood(filt_dict, t) for filt_dict in filter_dicts])
-            rls = np.exp(rls)
+            # Approach: compute the log-likelihood (rlls) and then exponentiate the result (rls).
+            rlls = np.array([StaticMultipleModel.compute_residual_log_likelihood(filt_dict, t) for filt_dict in filter_dicts])
+            rls = np.exp(rlls)
 
-            next_mode_probs = rlls * mode_probs / np.dot(rll, mode_probs)
+            next_mode_probs = rls * mode_probs / np.dot(rls, mode_probs)
             mode_probs = next_mode_probs
 
         assert np.allclose( np.sum(mode_probs), 1. )
@@ -117,8 +117,7 @@ class StaticMultipleModel():
         dataset = tf.data.TFRecordDataset(dataset)
         dataset = dataset.map(_parse_no_img_function)
 
-        import pdb; pdb.set_trace() # TODO: remove this.
-        for ind_entry, entry in enumerate(dataset):
+        for entry in tqdm(dataset):
             prior_tms, prior_poses, future_tms  = EKFKinematicBase.preprocess_entry_prediction(entry)
 
             # Filter the previous pose history.
@@ -215,21 +214,8 @@ class StaticMultipleModel():
 
     def fit(self, train_set, val_set, logdir=None, **kwargs):
         """ This function fits the underlying process models (EKFs)
-            disturbance covariance (Q) based on a heuristic assignment
-            and EM algorithm approach.
-
-            Basic Idea:
-                - Initialize all filters with Q = I_nx, where nx = state dim of that model.
-                - For each dataset instance,
-                    - Find the closest process model, measured using residual_log_likelihood
-                    - Assign this dataset instance to its "nearest" model
-                - For each model,
-                    - Fit the covariance Q for this model using EM, but only on the subset of
-                      dataset instances assigned to this model.
-
-            We could futher iterate between assignment of dataset instances + fitting the process models,
-            but this would take a very long time.  One pass should be enough, assuming changing Q's have
-            low impact on the residual log likelihood as compared to the process model itself.
+            disturbance covariance (Q) by partitioning the full dataset
+            into subsets per process model.
         """
 
         train_dataset = tf.data.TFRecordDataset(train_set)
@@ -238,7 +224,7 @@ class StaticMultipleModel():
         cached_train_dataset      = []
         filter_assignment_dataset = []
 
-        for ind_entry, entry in tqdm(enumerate(train_dataset)):
+        for entry in tqdm(train_dataset):
 
             # Incrementally add the tfrecord processed entries to a cached dataset.
             # Useful since we want to do random access and partition this later on.
