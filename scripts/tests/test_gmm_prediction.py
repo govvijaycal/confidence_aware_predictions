@@ -123,6 +123,30 @@ def test_compute_trajectory_log_likelihood(gmm_preds):
 
 		assert np.isclose(naive_ll, lse_ll)
 
+def test_get_class_top_k_scores(gmm_preds):
+	# Test 1: Small perturbations about the most likely trajectory should result
+	#         in 100% accuracy for all values of k.
+	#         Also growing k should not reduce the accuracy.
+	test_traj = np.copy(gmm_preds.mus[np.argmax(gmm_preds.mode_probabilities)])
+	test_traj += generate_perturbation_traj(test_traj.shape[0], 0.1)
+
+	top_k_scores = gmm_preds.get_class_top_k_scores(test_traj, ks=[1,3,5])
+
+	assert np.all(np.array(top_k_scores) == 1)
+	assert np.all( np.arange(len(top_k_scores)) == np.argsort(top_k_scores) )
+
+	# Test 2: Small perturbations about the least likely trajectory should result
+	#         in 100% accuracy when k >= num modes of original GMM.
+	#         Also growing k should not reduce the accuracy.
+	test_traj = np.copy(gmm_preds.mus[np.argmin(gmm_preds.mode_probabilities)])
+	test_traj += generate_perturbation_traj(test_traj.shape[0], 0.1)
+
+	top_k_scores = gmm_preds.get_class_top_k_scores(test_traj, ks=[1,3,5])
+
+	assert top_k_scores[0] == 0
+	assert np.all(np.array(top_k_scores[1:]) == 1)
+	assert np.all( np.arange(len(top_k_scores)) == np.argsort(top_k_scores) )
+
 def test_compute_min_ADE(gmm_preds):
 	# Add noise within a norm ball of a true trajectory.
 	# The minADE should be upper-bounded by the max radius.

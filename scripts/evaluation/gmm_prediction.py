@@ -43,6 +43,17 @@ class GMMPrediction:
 
 		return GMMPrediction(k, self.n_timesteps, mode_probs_k, mus_k, sigmas_k)
 
+	def get_mode_ADEs(self, traj_xy):
+		# Returns the average displacement error (ADE) across all modes in the GMM.
+		ades = []
+
+		for mode in range(self.n_modes):
+			traj_xy_pred = self.mus[mode]
+			displacements = np.linalg.norm(traj_xy_pred - traj_xy, axis=-1)
+			ades.append(np.mean(displacements))
+
+		return ades
+
 	##################################################################
 	#################### LIKELIHOOD METRIC ###########################
 	def compute_trajectory_log_likelihood(self, traj_xy):
@@ -84,29 +95,24 @@ class GMMPrediction:
 
 	##################################################################
 	################## CLASSIFICATION METRICS ########################
-	# TODO: remove usage of anchors here.
-	# def get_class_top_k_scores(self, traj_xy, anchors, ks = [1, 3, 5]):
-	# 	scores = []
-	# 	anchor_label = self.get_anchor_label(traj_xy, anchors)
+	def get_class_top_k_scores(self, traj_xy, ks = [1, 3, 5]):
+		scores = []
+		mode_label = np.argmin(self.get_mode_ADEs(traj_xy))
 
-	# 	for k in ks:
-	# 		acc_top_k = (anchor_label in self.get_top_k_mode_labels(k=k))
-	# 		scores.append(1 if acc_top_k else 0)
+		for k in ks:
+			if k > self.n_modes:
+				scores.append(1)
+			else:
+				acc_top_k = (mode_label in self.get_top_k_mode_labels(k=k))
+				scores.append(1 if acc_top_k else 0)
 
-	# 	return scores
+		return scores
 
 	##################################################################
 	#################### TRAJECTORY METRICS ##########################
 	def compute_min_ADE(self, traj_xy):
 		# min_ADE = minimum average displacement error among all modes in the GMM.
-		ades = []
-
-		for mode in range(self.n_modes):
-			traj_xy_pred = self.mus[mode]
-			displacements = np.linalg.norm(traj_xy_pred - traj_xy, axis=-1)
-			ades.append(np.mean(displacements))
-
-		return np.amin(ades)
+		return np.amin(self.get_mode_ADEs(traj_xy))
 
 	def compute_min_FDE(self, traj_xy):
 		# min FDE = minimum final displacement error among all modes in the GMM.
