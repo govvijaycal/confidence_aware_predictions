@@ -1,6 +1,4 @@
 import os
-import sys
-import json
 import numpy as np
 import argparse
 
@@ -12,7 +10,7 @@ from models.static_multiple_model import StaticMultipleModel
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser("Train prediction models on either Nuscenes or L5Kit datasets.")
-    parser.add_argument("--dataset", choices=["l5kit", "nuscenes"], type=str, required=True, "Which dataset to use.")
+    parser.add_argument("--dataset", choices=["l5kit", "nuscenes"], type=str, required=True, help="Which dataset to use.")
     args = parser.parse_args()
 
     repo_path = os.path.abspath(__file__).split('scripts')[0]
