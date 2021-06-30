@@ -30,7 +30,8 @@ class MultiPathBase(ABC):
                  lr_min=1e-4,
                  lr_max=1e-3,
                  lr_max_decay=1e-2,
-                 lr_period=10):
+                 lr_period=10,
+                 use_context=True):
 
         self.num_timesteps = num_timesteps
         self.history_timesteps = num_hist_timesteps
@@ -41,6 +42,8 @@ class MultiPathBase(ABC):
         self.lr_max = lr_max
         self.lr_max_decay = lr_max_decay
         self.lr_period = lr_period
+
+        self.use_context = use_context # if False, give a zeroed out image for training/prediction.
 
         # We use the minimum learning rate for the first epoch for learning rate "warmup".
         optimizer = SGD(lr=self.lr_min,
@@ -54,6 +57,7 @@ class MultiPathBase(ABC):
                            optimizer=optimizer)
         self.trained = False
         print(self.model.summary())
+        print(f"Training with context: {self.use_context}")
 
     @abstractmethod
     def _create_model(self):
@@ -134,11 +138,14 @@ class MultiPathBase(ABC):
         return y
 
     @staticmethod
-    def preprocess_entry(entry):
+    def preprocess_entry(entry, use_image=True):
         """ Prepares a batch of features = (images, past_states) and
             labels = xy trajectory given an entry from a TF Dataset.
         """
-        img = preprocess_input(tf.cast(entry['image'], dtype=tf.float32))
+        if use_image:
+            img = preprocess_input(tf.cast(entry['image'], dtype=tf.float32))
+        else:
+            img = tf.zeros(shape=entry['image'].shape, dtype=tf.float32)
 
         future_xy = tf.cast(entry['future_poses_local'][:, :, :2], dtype=tf.float32)
 
@@ -198,7 +205,7 @@ class MultiPathBase(ABC):
             ades = []
 
             for entry in dataset:
-                img, past_states, future_xy = self.preprocess_entry(entry)
+                img, past_states, future_xy = self.preprocess_entry(entry, use_image=self.use_context)
                 batch_loss, batch_ade = self.model.train_on_batch([img, past_states], future_xy)
                 losses.append(batch_loss)
                 ades.append(batch_ade)
@@ -212,7 +219,7 @@ class MultiPathBase(ABC):
                 val_ades = []
 
                 for entry in val_dataset:
-                    img, past_states, future_xy = self.preprocess_entry(entry)
+                    img, past_states, future_xy = self.preprocess_entry(entry, use_image=self.use_context)
                     batch_loss, batch_ade = self.model.test_on_batch(
                         [img, past_states], future_xy)
                     val_losses.append(batch_loss)
@@ -271,7 +278,7 @@ class MultiPathBase(ABC):
                                        entry['future_poses_local']], -1)
             future_states = tf.cast(future_states, dtype=tf.float32)
 
-            img, past_states, _ = self.preprocess_entry(entry)
+            img, past_states, _ = self.preprocess_entry(entry, use_image=self.use_context)
             gmm_pred = self.model.predict_on_batch([img, past_states])  # raw prediction tensor
             gmm_dicts = self._extract_gmm_params(gmm_pred)  # processed prediction as a dict
 
@@ -295,7 +302,11 @@ class MultiPathBase(ABC):
     def predict_instance(self, image_raw, past_states):
         if len(image_raw.shape) == 3:
             image_raw = np.expand_dims(image_raw, 0)
-        img = preprocess_input(tf.cast(image_raw, dtype=tf.float32))
+
+        if self.use_context:
+            img = preprocess_input(tf.cast(image_raw, dtype=tf.float32))
+        else:
+            img = tf.zeros(shape=image_raw.shape, dtype=tf.float32)
 
         if len(past_states.shape) == 2:
             past_states = np.expand_dims(past_states, 0)
