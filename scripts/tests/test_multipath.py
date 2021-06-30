@@ -12,6 +12,9 @@ sys.path.append(scriptdir)
 from datasets.tfrecord_utils import _parse_function
 from models.multipath import MultiPath
 
+# To address some CuDNN initialization errors, idk why needed only here.
+os.environ["TF_FORCE_GPU_ALLOW_GROWTH"]="true"
+
 '''
 Test Fixture Parametrized by Dataset.
 '''
@@ -29,15 +32,15 @@ def multipath_and_dataset(request):
 		num_timesteps = 25
 		num_hist_timesteps = 5
 		anchors = np.load(datadir + '/l5kit_clusters_16.npy')
-		tfrecords = glob.glob(datadir + '/l5kit_val*.record')
+		tfrecords = glob.glob(datadir + '/l5kit_val*0.record')
 
-	multipath = MultiPath(num_timesteps=num_timesteps, 
+	multipath = MultiPath(num_timesteps=num_timesteps,
 		                  num_hist_timesteps=num_hist_timesteps,
 		                  anchors=anchors)
-	
+
 	dataset = tf.data.TFRecordDataset(tfrecords)
 	dataset = dataset.map(_parse_function)
-	dataset = dataset.batch(32)
+	dataset = dataset.batch(8)
 
 	return multipath, dataset
 
@@ -54,7 +57,7 @@ def numpy_ade(anchors, y_true, y_pred):
 	batch_size, num_timesteps, _ = y_true.shape
 	num_anchors = len(anchors)
 
-	trajectories = np.reshape(y_pred[:,:-num_anchors], 
+	trajectories = np.reshape(y_pred[:,:-num_anchors],
 		                      (batch_size, num_anchors, num_timesteps, 5))
 	anchor_probs = tf.nn.softmax( y_pred[:,-num_anchors:], axis=1)
 
@@ -103,13 +106,13 @@ def numpy_nll(anchors, y_true, y_pred):
 		for t in range(num_timesteps):
 			mean_xy = active_pred_traj[t, :2] + anchors[active_mode, t, :]
 			residual_xy = y_true[batch_ind, t, :] - mean_xy
-			std_x = np.exp( np.abs(active_pred_traj[t, 2]) )
-			std_y = np.exp( np.abs(active_pred_traj[t, 3]) )
+			std_1 = np.exp( np.abs(active_pred_traj[t, 2]) )
+			std_2 = np.exp( np.abs(active_pred_traj[t, 3]) )
 			cos_th = np.cos(active_pred_traj[t, 4])
 			sin_th = np.sin(active_pred_traj[t, 4])
-			R_th   = np.array([[cos_th, -sin_th], 
+			R_th   = np.array([[cos_th, -sin_th],
 				               [sin_th,  cos_th]])
-			cov_xy = R_th @ np.diag([std_x**2, std_y**2]) @ R_th.T
+			cov_xy = R_th @ np.diag([std_1**2, std_2**2]) @ R_th.T
 			log_det_loss += np.float32(0.5) * np.log( np.linalg.det(cov_xy) )
 			mahalanobis_loss += np.float32(0.5) * residual_xy.T @ np.linalg.inv(cov_xy) @ residual_xy
 
@@ -123,11 +126,11 @@ def make_correct_mode_predictions(anchors, gt_indices = [0, 5, 10]):
 	# This function makes fake predictions according to the following scheme:
 	# The batch_size is len(gt_indices) and classification error is 0.
 	# The true trajectories are simply the anchors identified by gt_indices.
-	# y_pred is a bunch of random floats, aside from the values given for the 
+	# y_pred is a bunch of random floats, aside from the values given for the
 	# gt_index which are random mean and fixed covariance parameters.
 	# y_true: batch_size x num_timesteps x 2
 	# y_pred: batch_size x (num_anchors x (1 + 5 * num_timesteps))
-	
+
 	batch_size    = len(gt_indices)
 	num_anchors   = anchors.shape[0]
 	num_timesteps = anchors.shape[1]
@@ -160,7 +163,7 @@ def test_fake_predictions(multipath_and_dataset):
 	anchors = multipath.anchors.numpy()
 
 	y_true, y_pred = make_correct_mode_predictions(anchors)
-	
+
 	np_ade = numpy_ade(anchors, y_true, y_pred)
 	np_nll = numpy_nll(anchors, y_true, y_pred)
 
@@ -169,15 +172,15 @@ def test_fake_predictions(multipath_and_dataset):
 
 	assert np.isclose(np_ade, tf_ade) and np.isclose(np_nll, tf_nll)
 
-def test_full_dataset(multipath_and_dataset, max_iters=100):
+def test_full_dataset(multipath_and_dataset, max_iters=10):
 	# Check that ADE / LL match across max_iters of a tfrecord dataset.
 	multipath, dataset = multipath_and_dataset
 	anchors = multipath.anchors.numpy()
 	tf_ade_metric = multipath.ade_mm()
 	tf_ll_loss = multipath.likelihood_loss_mm()
 
-	for ind_entry, entry in enumerate(dataset):		
-		img, past_states, future_xy = multipath.preprocess_entry(entry)		
+	for ind_entry, entry in enumerate(dataset):
+		img, past_states, future_xy = multipath.preprocess_entry(entry)
 		pred = multipath.model.predict_on_batch([img, past_states])
 
 		tf_ade = tf_ade_metric(future_xy, pred).numpy()
@@ -190,4 +193,3 @@ def test_full_dataset(multipath_and_dataset, max_iters=100):
 
 		if max_iters is not None and ind_entry > max_iters:
 			break
-		

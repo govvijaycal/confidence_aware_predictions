@@ -12,6 +12,9 @@ sys.path.append(scriptdir)
 from datasets.tfrecord_utils import _parse_function
 from models.regression import Regression
 
+# To address some CuDNN initialization errors, idk why needed only here.
+os.environ["TF_FORCE_GPU_ALLOW_GROWTH"]="true"
+
 '''
 Test Fixture Parametrized by Dataset.
 '''
@@ -22,19 +25,19 @@ def regression_and_dataset(request):
 
 	if request.param == 'nuscenes':
 		num_timesteps = 12
-		num_hist_timesteps = 2		
+		num_hist_timesteps = 2
 		tfrecords = glob.glob(datadir + '/nuscenes_train_val*.record')
 	elif request.param == 'l5kit':
 		num_timesteps = 25
-		num_hist_timesteps = 5		
-		tfrecords = glob.glob(datadir + '/l5kit_val*.record')
+		num_hist_timesteps = 5
+		tfrecords = glob.glob(datadir + '/l5kit_val*0.record')
 
-	regression = Regression(num_timesteps=num_timesteps, 
+	regression = Regression(num_timesteps=num_timesteps,
 		                    num_hist_timesteps=num_hist_timesteps)
-	
+
 	dataset = tf.data.TFRecordDataset(tfrecords)
 	dataset = dataset.map(_parse_function)
-	dataset = dataset.batch(32)
+	dataset = dataset.batch(8)
 
 	return regression, dataset
 
@@ -42,12 +45,12 @@ def regression_and_dataset(request):
 Util Test Functions: Metrics/Loss/Fake Predictions
 '''
 def numpy_ade(y_true, y_pred):
-	# Returns the average displacement error (ADE) for a batch of data.		
+	# Returns the average displacement error (ADE) for a batch of data.
 	# y_true: batch_size x num_timesteps x 2
 	# y_pred: batch_size x (5 * num_timesteps)
 
-	batch_size, num_timesteps, _ = y_true.shape	
-	trajectories = np.reshape(y_pred, (batch_size, num_timesteps, 5))	
+	batch_size, num_timesteps, _ = y_true.shape
+	trajectories = np.reshape(y_pred, (batch_size, num_timesteps, 5))
 
 	ades = []
 
@@ -63,36 +66,36 @@ def numpy_ade(y_true, y_pred):
 	return np.mean(ades)
 
 def numpy_nll(y_true, y_pred):
-	# Returns Negative Log Likelihood Loss for a batch of data.	
+	# Returns Negative Log Likelihood Loss for a batch of data.
 	# y_true: batch_size x num_timesteps x 2
 	# y_pred: batch_size x (5 * num_timesteps)
 
 	batch_size, num_timesteps, _ = y_true.shape
-	trajectories = np.reshape(y_pred, (batch_size, num_timesteps, 5))	
+	trajectories = np.reshape(y_pred, (batch_size, num_timesteps, 5))
 
 	neg_log_likelihoods = []
 
-	for batch_ind in range(batch_size):			
+	for batch_ind in range(batch_size):
 		pred_traj = trajectories[batch_ind]
 		true_traj = y_true[batch_ind]
 
 		log_det_loss     = np.float32(0.)
 		mahalanobis_loss = np.float32(0.)
 
-		for t in range(num_timesteps):			
+		for t in range(num_timesteps):
 			residual_xy = true_traj[t, :] - pred_traj[t, :2]
-			std_x = np.exp( np.abs(pred_traj[t, 2]) )
-			std_y = np.exp( np.abs(pred_traj[t, 3]) )
+			std_1 = np.exp( np.abs(pred_traj[t, 2]) )
+			std_2 = np.exp( np.abs(pred_traj[t, 3]) )
 			cos_th = np.cos(pred_traj[t, 4])
 			sin_th = np.sin(pred_traj[t, 4])
-			R_th   = np.array([[cos_th, -sin_th], 
+			R_th   = np.array([[cos_th, -sin_th],
 				               [sin_th,  cos_th]])
-			cov_xy = R_th @ np.diag([std_x**2, std_y**2]).astype(R_th.dtype) @ R_th.T
+			cov_xy = R_th @ np.diag([std_1**2, std_2**2]).astype(R_th.dtype) @ R_th.T
 			log_det_loss += np.float32(0.5) * np.log( np.linalg.det(cov_xy) )
 			mahalanobis_loss += np.float32(0.5) * residual_xy.T @ np.linalg.inv(cov_xy) @ residual_xy
-		
+
 		nll = log_det_loss + mahalanobis_loss
-		neg_log_likelihoods.append(nll)		
+		neg_log_likelihoods.append(nll)
 
 	return np.mean(neg_log_likelihoods)
 
@@ -100,7 +103,7 @@ def make_fake_predictions(num_timesteps):
 	# This function makes fake predictions with XY noise about the true trajectory.
 	# y_true: batch_size x num_timesteps x 2
 	# y_pred: batch_size x (5 * num_timesteps)
-	
+
 	y_true = np.ones((4, num_timesteps, 2)) * np.nan
 	y_true[0] = np.zeros((num_timesteps, 2))                                     # stationary
 	y_true[1] = np.array([[5*t, 0.] for t in range(num_timesteps)])              # constant velocity
@@ -114,7 +117,7 @@ def make_fake_predictions(num_timesteps):
 	                   [np.log(1.), np.log(5.), np.radians(30.)]
 	y_pred = np.concatenate((random_mean, fixed_covar), axis=-1)
 	y_pred = y_pred.reshape((batch_size, 5 * num_timesteps))
-		                     
+
 	return y_true.astype(np.float32), y_pred.astype(np.float32)
 
 '''
@@ -124,29 +127,26 @@ def test_fake_predictions(regression_and_dataset):
 	# Check that ADE / LL match for a set of fake predictions.
 	regression, _ = regression_and_dataset
 	tf_ade_metric = regression.ade_1()
-	tf_ll_loss = regression.likelihood_loss_1()	
+	tf_ll_loss = regression.likelihood_loss_1()
 
 	y_true, y_pred = make_fake_predictions(regression.num_timesteps)
-	
+
 	np_ade = numpy_ade(y_true, y_pred)
 	np_nll = numpy_nll(y_true, y_pred)
 
 	tf_ade = tf_ade_metric(y_true, y_pred).numpy()
 	tf_nll = tf_ll_loss(y_true, y_pred).numpy()
 
-	ade_diff = np.abs(np_ade - tf_ade)
-	nll_diff = np.abs(np_nll - tf_nll)
-
 	assert np.isclose(np_ade, tf_ade) and np.isclose(np_nll, tf_nll)
 
-def test_full_dataset(regression_and_dataset, max_iters=100):
+def test_full_dataset(regression_and_dataset, max_iters=10):
 	# Check that ADE / LL match across max_iters of a tfrecord dataset.
 	regression, dataset = regression_and_dataset
 	tf_ade_metric = regression.ade_1()
 	tf_ll_loss = regression.likelihood_loss_1()
 
-	for ind_entry, entry in enumerate(dataset):		
-		img, past_states, future_xy = regression.preprocess_entry(entry)		
+	for ind_entry, entry in enumerate(dataset):
+		img, past_states, future_xy = regression.preprocess_entry(entry)
 		pred = regression.model.predict_on_batch([img, past_states])
 
 		tf_ade = tf_ade_metric(future_xy, pred).numpy()
@@ -159,4 +159,3 @@ def test_full_dataset(regression_and_dataset, max_iters=100):
 
 		if max_iters is not None and ind_entry > max_iters:
 			break
-		
