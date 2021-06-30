@@ -1,6 +1,6 @@
 import os
 import sys
-import numpy as np 
+import numpy as np
 from tqdm import tqdm
 import pandas as pd
 
@@ -70,10 +70,10 @@ def compute_trajectory_metrics(predict_dict, ks_eval=[1,3,5]):
             metric_dict["sample"], metric_dict["instance"] = key.split("_")
 
         # Compute length/curvature of the ground truth trajectory.
-        metric_dict["length"], metric_dict["curvature"] =
-            compute_length_curvature(traj_actual[:, 1:])
+        metric_dict["length"], metric_dict["curvature"] = \
+            compute_length_and_curvature(traj_actual[:, 1:])
 
-        metric_dict["num_modes"] = n_modes
+        metric_dict["num_modes"] = gmm_pred.n_modes
         if metric_dict["num_modes"] == 1:
             traj_ll_um = gmm_pred.compute_trajectory_log_likelihood(traj_xy)
             min_ade_um = gmm_pred.compute_min_ADE(traj_xy)
@@ -84,9 +84,17 @@ def compute_trajectory_metrics(predict_dict, ks_eval=[1,3,5]):
                 metric_dict[f"min_ade_{k}"]   = min_ade_um
                 metric_dict[f"min_fde_{k}"]   = min_fde_um
         else:
-            metric_dict[f"class_top_{k}"] = gmm_pred.get_class_top_k_scores(traj_xy, ks_eval)
-            for k in ks_eval:
-                trunc_gmm_k = gmm_pred.get_top_k_GMM(k)
+            scores = gmm_pred.get_class_top_k_scores(traj_xy, ks_eval)
+
+            for k, score in zip(ks_eval, scores):
+                metric_dict[f"class_top_{k}"] = score
+
+                # Truncation only possible if k < modes of original GMM.
+                if k < gmm_pred.n_modes:
+                    trunc_gmm_k = gmm_pred.get_top_k_GMM(k)
+                else:
+                    trunc_gmm_k = gmm_pred
+
                 metric_dict[f"traj_LL_{k}"] = trunc_gmm_k.compute_trajectory_log_likelihood(traj_xy)
                 metric_dict[f"min_ade_{k}"] = trunc_gmm_k.compute_min_ADE(traj_xy)
                 metric_dict[f"min_fde_{k}"] = trunc_gmm_k.compute_min_FDE(traj_xy)
@@ -101,8 +109,8 @@ def compute_trajectory_metrics(predict_dict, ks_eval=[1,3,5]):
 ########################################### SET METRICS ############################################
 def make_set_metric_dict(ks_eval, betas_eval):
     # Prepares a template dictionary for storing computed set metrics.
-    keys = ["set_acc_k{k}_b{beta}" for k in ks_eval for b in betas_eval]
-    keys.extend([f"set_area_k{k}_b{beta}" for k in ks_eval for b in betas_eval])
+    keys = [f"set_acc_k{k}_b{b}" for k in ks_eval for b in betas_eval]
+    keys.extend([f"set_area_k{k}_b{b}" for k in ks_eval for b in betas_eval])
     return {k:None for k in keys}
 
 def compute_set_metrics(predict_dict, ks_eval=[1,3,5], betas_eval=[2,4,6,8,10]):
@@ -125,15 +133,37 @@ def compute_set_metrics(predict_dict, ks_eval=[1,3,5], betas_eval=[2,4,6,8,10]):
             # Nuscenes dataset.
             set_metric_dict["sample"], set_metric_dict["instance"] = key.split("_")
 
-        for k in ks_eval:
-            trunc_gmm_k = gmm_pred.get_top_k_GMM(k)
+        set_metric_dict["num_modes"] = gmm_pred.n_modes
+        if set_metric_dict["num_modes"] == 1:
+            set_accs  = [gmm_pred.compute_set_accuracy(traj_xy, beta) for beta in betas_eval]
+            set_betas = [gmm_pred.compute_set_area(beta)[0] for beta in betas_eval]
 
+            for k in ks_eval:
+                for ind_beta, beta in enumerate(betas_eval):
+                    set_metric_dict[f"set_acc_k{k}_b{beta}"] = set_accs[ind_beta]
+                    set_metric_dict[f"set_area_k{k}_b{beta}"] = set_betas[ind_beta]
+        else:
             for beta in betas_eval:
-                set_metric_dict[f"set_acc_k{k}_b{beta}"] =
-                    trunc_gmm_k.compute_set_accuracy(traj_xy, beta)
-                set_metric_dict[f"set_area_k{k}_b{beta}"] =
-                    trunc_gmm_k.compute_set_area(beta)
+                for k in ks_eval:
+                    # Truncation only possible if k < modes of original GMM.
+                    if k < gmm_pred.n_modes:
+                        trunc_gmm_k = gmm_pred.get_top_k_GMM(k)
+                    else:
+                        trunc_gmm_k = gmm_pred
 
+                    set_metric_dict[f"set_acc_k{k}_b{beta}"] = \
+                        trunc_gmm_k.compute_set_accuracy(traj_xy, beta)
+                    set_metric_dict[f"set_area_k{k}_b{beta}"], occ = \
+                        trunc_gmm_k.compute_set_area(beta)
+
+                    # import matplotlib.pyplot as plt
+                    # area = set_metric_dict[f"set_area_k{k}_b{beta}"]
+                    # plt.imshow(occ)
+                    # plt.title(f"k{k}_b{beta}_a{area}")
+                    # plt.show()
+
+        # if(set_metric_dict["num_modes"] > 1):
+        #     import pdb; pdb.set_trace()
         data_list.append(set_metric_dict)
 
     set_metric_df = pd.DataFrame(data_list)
