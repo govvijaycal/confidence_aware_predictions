@@ -45,8 +45,8 @@ class Regression(MultiPathBase):
 
 			trajectory = tf.reshape(entry, (self.num_timesteps, 5)) # N_T x 5
 			traj_xy = trajectory[:, :2].numpy()
-			std1 = tf.math.exp(tf.math.abs(trajectory[:, 2])).numpy()
-			std2 = tf.math.exp(tf.math.abs(trajectory[:, 3])).numpy()
+			std1 = tf.math.exp( tf.clip_by_value(tf.math.abs(trajectory[:, 2]), 0.0, 5.0) ).numpy()
+			std2 = tf.math.exp( tf.clip_by_value(tf.math.abs(trajectory[:, 3]), 0.0, 5.0) ).numpy()
 			cos_th = tf.math.cos(trajectory[:,4]).numpy()
 			sin_th = tf.math.sin(trajectory[:,4]).numpy()
 
@@ -106,8 +106,8 @@ class Regression(MultiPathBase):
 			# the covariance parameters (log_std1, log_std2, theta).
 			dx = residual_trajs[:, :, 0]
 			dy = residual_trajs[:, :, 1]
-			log_std1 = tf.math.abs( trajectories[:,:,2] )
-			log_std2 = tf.math.abs( trajectories[:,:,3] )
+			log_std1 = tf.clip_by_value( tf.math.abs(trajectories[:,:,2]), 0.0, 5.0 )
+			log_std2 = tf.clip_by_value( tf.math.abs(trajectories[:,:,3]), 0.0, 5.0 )
 			std1     = tf.math.exp(log_std1)
 			std2     = tf.math.exp(log_std2)
 			cos_th   = tf.math.cos(trajectories[:,:,4])

@@ -75,6 +75,9 @@ def numpy_nll(y_true, y_pred):
 
 	neg_log_likelihoods = []
 
+	LOG_STD_MIN = np.float32(0.)
+	LOG_STD_MAX = np.float32(5.)
+
 	for batch_ind in range(batch_size):
 		pred_traj = trajectories[batch_ind]
 		true_traj = y_true[batch_ind]
@@ -84,8 +87,8 @@ def numpy_nll(y_true, y_pred):
 
 		for t in range(num_timesteps):
 			residual_xy = true_traj[t, :] - pred_traj[t, :2]
-			std_1 = np.exp( np.abs(pred_traj[t, 2]) )
-			std_2 = np.exp( np.abs(pred_traj[t, 3]) )
+			std_1 = np.exp( np.clip(np.abs(pred_traj[t, 2]), LOG_STD_MIN, LOG_STD_MAX) )
+			std_2 = np.exp( np.clip(np.abs(pred_traj[t, 3]), LOG_STD_MIN, LOG_STD_MAX) )
 			cos_th = np.cos(pred_traj[t, 4])
 			sin_th = np.sin(pred_traj[t, 4])
 			R_th   = np.array([[cos_th, -sin_th],

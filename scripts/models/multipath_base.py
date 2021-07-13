@@ -57,7 +57,7 @@ class MultiPathBase(ABC):
                            optimizer=optimizer)
         self.trained = False
         print(self.model.summary())
-        print(f"Training with context: {self.use_context}")
+        print(f"Using context: {self.use_context}")
 
     @abstractmethod
     def _create_model(self):

@@ -78,8 +78,8 @@ class MultiPath(MultiPathBase):
 			for mode_id in range(self.num_anchors):
 				traj_xy = (trajectories[mode_id, :, :2].numpy() + anchors[mode_id])
 
-				std1   = tf.math.exp(tf.math.abs(trajectories[mode_id, :, 2])).numpy()
-				std2   = tf.math.exp(tf.math.abs(trajectories[mode_id, :, 3])).numpy()
+				std1   = tf.math.exp( tf.clip_by_value(tf.math.abs(trajectories[mode_id, :, 2]), 0.0, 5.0) ).numpy()
+				std2   = tf.math.exp( tf.clip_by_value(tf.math.abs(trajectories[mode_id, :, 3]), 0.0, 5.0) ).numpy()
 				cos_th = tf.math.cos(trajectories[mode_id, :, 4]).numpy()
 				sin_th = tf.math.sin(trajectories[mode_id, :, 4]).numpy()
 
@@ -180,8 +180,10 @@ class MultiPath(MultiPathBase):
 			# the covariance parameters (log_std1, log_std2, theta).
 			dx = residual_trajs[:, :, 0]
 			dy = residual_trajs[:, :, 1]
-			log_std1 = tf.math.abs(tf.gather_nd(trajectories[:,:,:,2], nearest_mode_indices))
-			log_std2 = tf.math.abs(tf.gather_nd(trajectories[:,:,:,3], nearest_mode_indices))
+			log_std1 = tf.clip_by_value( tf.math.abs(tf.gather_nd(trajectories[:,:,:,2], nearest_mode_indices)),
+				                         0.0, 5.0 )
+			log_std2 = tf.clip_by_value( tf.math.abs(tf.gather_nd(trajectories[:,:,:,3], nearest_mode_indices)),
+				                         0.0, 5.0 )
 			std1     = tf.math.exp(log_std1)
 			std2     = tf.math.exp(log_std2)
 			cos_th   = tf.math.cos( tf.gather_nd(trajectories[:,:,:,4], nearest_mode_indices) )

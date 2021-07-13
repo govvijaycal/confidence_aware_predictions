@@ -95,6 +95,9 @@ def numpy_nll(anchors, y_true, y_pred):
 		dists_to_anchor = [np.sum(np.linalg.norm(current_traj - anc, axis=-1), axis=-1) for anc in anchors]
 		active_modes.append(np.argmin(dists_to_anchor))
 
+	LOG_STD_MIN = np.float32(0.)
+	LOG_STD_MAX = np.float32(5.)
+
 	for batch_ind, active_mode in enumerate(active_modes):
 		current_pred = y_pred[batch_ind]
 		active_pred_traj = current_pred[:-num_anchors].reshape(num_anchors, num_timesteps, 5)[active_mode]
@@ -106,8 +109,8 @@ def numpy_nll(anchors, y_true, y_pred):
 		for t in range(num_timesteps):
 			mean_xy = active_pred_traj[t, :2] + anchors[active_mode, t, :]
 			residual_xy = y_true[batch_ind, t, :] - mean_xy
-			std_1 = np.exp( np.abs(active_pred_traj[t, 2]) )
-			std_2 = np.exp( np.abs(active_pred_traj[t, 3]) )
+			std_1 = np.exp( np.clip(np.abs(active_pred_traj[t, 2]), LOG_STD_MIN, LOG_STD_MAX) )
+			std_2 = np.exp( np.clip(np.abs(active_pred_traj[t, 3]), LOG_STD_MIN, LOG_STD_MAX) )
 			cos_th = np.cos(active_pred_traj[t, 4])
 			sin_th = np.sin(active_pred_traj[t, 4])
 			R_th   = np.array([[cos_th, -sin_th],
