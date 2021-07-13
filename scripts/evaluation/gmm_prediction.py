@@ -83,7 +83,11 @@ class GMMPrediction:
 			weight = self.mode_probabilities[mode]
 			residual_traj = traj_xy - self.mus[mode]
 
-			exp_term  = np.log(weight) - const_term
+			# Handle very low (zero) probabilities.
+			# Should work since logsumexp can handle -inf arguments.
+			with np.errstate(divide='ignore'):
+				exp_term  = np.log(weight) - const_term
+
 			exp_term -= 0.5 * np.sum( [np.log(np.linalg.det(covar)) for covar in self.sigmas[mode]] )
 			exp_term -= 0.5 * np.sum( [residual_traj[tm_step].T @ \
 				                       np.linalg.pinv(self.sigmas[mode][tm_step]) @ \
