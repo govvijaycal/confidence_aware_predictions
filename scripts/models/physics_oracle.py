@@ -8,7 +8,7 @@ import sys
 import os
 import glob
 import json
-import numpy as np 
+import numpy as np
 import tensorflow as tf
 from nuscenes.eval.prediction.data_classes import Prediction
 
@@ -119,27 +119,27 @@ def make_predictions(dataset, savefile):
 		state_dict['yawrate'] = yawrate
 		state_dict['acc']     = acc
 
-		pred_trajs = [pf(state_dict) for pf in pred_funcs] 
+		pred_trajs = [pf(state_dict) for pf in pred_funcs]
 
 		actual_traj = convert_local_to_global(entry['pose'].numpy(), entry['future_poses_local'].numpy())[:,:2]
 
 		best_traj_index = np.argmin([ np.sum(np.linalg.norm(actual_traj - pred_traj, axis=-1), axis=-1)
 		                              for pred_traj in pred_trajs ])
-	
+
 		best_traj = pred_trajs[best_traj_index]
 
 		oracle_preds.append( Prediction(instance, sample, np.expand_dims(best_traj, 0), np.array([1.])).serialize() )
 
 	json.dump(oracle_preds, open(savefile, 'w'))
 
-		
+
 if __name__ == '__main__':
 	repo_path = os.path.abspath(__file__).split('scripts')[0]
 	datadir = repo_path + 'data'
 	logdir = repo_path + 'log/physics/'
 
 	os.makedirs(logdir, exist_ok=True)
-	
+
 	train_set = glob.glob(datadir + '/nuscenes_train*.record')
 	train_set = [x for x in train_set if 'val' not in x]
 
