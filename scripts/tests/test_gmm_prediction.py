@@ -56,7 +56,7 @@ def get_area_upper_bound(sigmas, beta):
 	area = 0.
 	for mode in range(sigmas.shape[0]):
 		for covar in sigmas[mode]:
-			evals, evecs = np.linalg.eig( covar ) # rotation/unitary matrices and evecs = diag(sigma_1**2, sigma_2**2)
+			evals, evecs = np.linalg.eigh( covar ) # rotation/unitary matrices and evecs = diag(sigma_1**2, sigma_2**2)
 
 			length_ax1 = np.sqrt(beta * evals[0]) # semi-major axis length, sigma_1 * sqrt(beta)
 			length_ax2 = np.sqrt(beta * evals[1]) # semi-minor axis length, sigma_2 * sqrt(beta)

@@ -153,7 +153,7 @@ class GMMPrediction:
 					hue = mode / self.n_modes
 					rgb = hsv_to_rgb(hue, 1., 1.)
 
-					evals, evecs = np.linalg.eig( covar ) # rotation/unitary matrices and evecs = diag(sigma_1**2, sigma_2**2)
+					evals, evecs = np.linalg.eigh( covar ) # rotation/unitary matrices and evecs = diag(sigma_1**2, sigma_2**2)
 
 					length_ax1 = np.sqrt(beta * evals[0]) # semi-major axis length, sigma_1 * sqrt(beta)
 					length_ax2 = np.sqrt(beta * evals[1]) # semi-minor axis length, sigma_2 * sqrt(beta)
@@ -206,7 +206,7 @@ class GMMPrediction:
 			for tm_step in range(self.n_timesteps):
 				center_px, center_py = local_coords_to_pixels(*self.mus[mode][tm_step])
 
-				evals, evecs = np.linalg.eig( self.sigmas[mode][tm_step] )
+				evals, evecs = np.linalg.eigh( self.sigmas[mode][tm_step] )
 
 				length_ax1 = int( np.sqrt(beta * evals[0]) / resolution )
 				length_ax2 = int( np.sqrt(beta * evals[1]) / resolution )
