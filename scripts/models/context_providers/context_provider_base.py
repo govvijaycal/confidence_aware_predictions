@@ -63,13 +63,14 @@ class ContextProviderBase:
     # This base class provides a basic API to query the scene context, which include
     # lanes, agents, and traffic lights in view,for a given dataset instance.
 
-    def __init__(self, overpass_url=None):
+    def __init__(self):
         # Bounds in local frame of the predicted agent.  Matches rasterization settings.
         self.in_view_bounds = [-10., -25., 40., 25.] # x_min, y_min, x_max, y_max (meters)
         self.view_radius = 50. # TODO
         self.lane_association_radius = 4. # a value greater than the typical lane width (meters)
         self.secs_of_hist = 1.0           # how many seconds back for which to provide agent/TL info
 
+    def _init_overpass(overpass_url):
         # Overpass API used to query speed limits (only once, for _generate_map_cache).
         if overpass_url is None:
             # Remote server (default but times out if you make too many queries.)

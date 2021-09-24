@@ -21,12 +21,15 @@ from l5kit.rasterization.semantic_rasterizer import INTERPOLATION_POINTS, Raster
 from l5kit.rasterization.sem_box_rasterizer_vg import SemBoxRasterizerVG
 from l5kit.sampling import get_agent_context
 
-from context_provider_base import ContextProviderBase, SceneContext
+scriptdir = os.path.abspath(__file__).split('scripts')[0] + 'scripts/'
+sys.path.append(scriptdir)
+from models.context_providers.context_provider_base import ContextProviderBase, SceneContext
 
 ####################################################################################################
 class L5KitContextProvider(ContextProviderBase):
-    def __init__(self, dataroot="/media/data/l5kit-data/"):
-        super().__init__(overpass_url="http://localhost/api/interpreter")
+    def __init__(self, dataroot="/media/data/l5kit-data/", overpass_url=None):
+        # Note: change overpass_url to http://localhost/api/interpreter for local server
+        super().__init__()
 
         dm  = LocalDataManager(local_data_folder=dataroot)
         cfg = load_config_data( os.path.abspath(__file__).split("models")[0] + \
@@ -43,12 +46,13 @@ class L5KitContextProvider(ContextProviderBase):
         centerline_cache_path = Path( f"{dataroot}/semantic_map/centerline_cache.pkl" )
         if not centerline_cache_path.exists():
             print('Generating and saving L5Kit centerlines cache.')
+            self._init_overpass(overpass_url)
             self._generate_map_cache(centerline_cache_path)
 
         print('Loading L5Kit centerlines cache.')
         self._load_map_cache(centerline_cache_path)
 
-        #self.train_zarr = ChunkedDataset(dm.require(cfg['train_data_loader']['key'])).open()
+        self.train_zarr = ChunkedDataset(dm.require(cfg['train_data_loader']['key'])).open()
         self.val_zarr   = ChunkedDataset(dm.require(cfg['val_data_loader']['key'])).open()
 
         # Make the sample function, adapted from the constructor of l5kit.dataset.EgoDataset.

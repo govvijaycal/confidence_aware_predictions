@@ -14,7 +14,9 @@ from nuscenes.prediction import PredictHelper
 from nuscenes.prediction.input_representation.static_layers import load_all_maps
 from nuscenes.prediction.input_representation.agents import reverse_history, add_present_time_to_history
 
-from context_provider_base import ContextProviderBase, SceneContext
+scriptdir = os.path.abspath(__file__).split('scripts')[0] + 'scripts/'
+sys.path.append(scriptdir)
+from models.context_providers.context_provider_base import ContextProviderBase, SceneContext
 
 # Map coordinates in WGS84 (EPSG:3857) were taken from the link:
 # https://github.com/nutonomy/nuscenes-devkit/blob/master/python-sdk/nuscenes/map_expansion/map_api.py#L46
@@ -25,8 +27,10 @@ MAP_LATLON_DICT['singapore-hollandvillage'] = [1.2993652317780957, 103.782176971
 MAP_LATLON_DICT['singapore-queenstown']     = [1.2782562240223188, 103.76741409301758]
 ####################################################################################################
 class NuScenesContextProvider(ContextProviderBase):
-    def __init__(self, dataroot="/media/data/nuscenes-data/"):
-        super().__init__(overpass_url="http://localhost/api/interpreter")
+    def __init__(self, dataroot="/media/data/nuscenes-data/", overpass_url=None):
+        # Note: change overpass_url to http://localhost/api/interpreter for local server
+        super().__init__()
+
         nusc = NuScenes('v1.0-trainval', dataroot=dataroot)
         self.helper = PredictHelper(nusc)
         self.maps = load_all_maps(self.helper)
@@ -34,6 +38,7 @@ class NuScenesContextProvider(ContextProviderBase):
         centerline_cache_path = Path( f"{dataroot}/maps/centerline_cache.pkl" )
         if not centerline_cache_path.exists():
             print('Generating and saving Nuscenes centerlines cache.')
+            self._init_overpass(overpass_url)
             self._generate_map_cache(centerline_cache_path)
 
         print('Loading Nuscenes centerlines cache.')
