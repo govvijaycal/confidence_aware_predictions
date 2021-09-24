@@ -10,6 +10,7 @@ scriptdir = os.path.abspath(__file__).split('scripts')[0] + 'scripts/'
 sys.path.append(scriptdir)
 
 from datasets.tfrecord_utils import _parse_function
+from datasets.splits import NUSCENES_VAL, L5KIT_VAL
 from models.multipath import MultiPath
 
 # To address some CuDNN initialization errors, idk why needed only here.
@@ -27,12 +28,12 @@ def multipath_and_dataset(request):
 		num_timesteps = 12
 		num_hist_timesteps = 2
 		anchors = np.load(datadir + '/nuscenes_clusters_16.npy')
-		tfrecords = glob.glob(datadir + '/nuscenes_train_val*.record')
+		tfrecords = NUSCENES_VAL
 	elif request.param == 'l5kit':
 		num_timesteps = 25
 		num_hist_timesteps = 5
 		anchors = np.load(datadir + '/l5kit_clusters_16.npy')
-		tfrecords = glob.glob(datadir + '/l5kit_val*0.record')
+		tfrecords = L5KIT_VAL
 
 	multipath = MultiPath(num_timesteps=num_timesteps,
 		                  num_hist_timesteps=num_hist_timesteps,

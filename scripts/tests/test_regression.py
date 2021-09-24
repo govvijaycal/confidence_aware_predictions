@@ -10,6 +10,7 @@ scriptdir = os.path.abspath(__file__).split('scripts')[0] + 'scripts/'
 sys.path.append(scriptdir)
 
 from datasets.tfrecord_utils import _parse_function
+from datasets.splits import NUSCENES_VAL, L5KIT_VAL
 from models.regression import Regression
 
 # To address some CuDNN initialization errors, idk why needed only here.
@@ -20,17 +21,14 @@ Test Fixture Parametrized by Dataset.
 '''
 @pytest.fixture(scope="module", params=['nuscenes', 'l5kit'])
 def regression_and_dataset(request):
-	repo_path = os.path.abspath(__file__).split('scripts')[0]
-	datadir = repo_path + 'data'
-
 	if request.param == 'nuscenes':
 		num_timesteps = 12
 		num_hist_timesteps = 2
-		tfrecords = glob.glob(datadir + '/nuscenes_train_val*.record')
+		tfrecords = NUSCENES_VAL
 	elif request.param == 'l5kit':
 		num_timesteps = 25
 		num_hist_timesteps = 5
-		tfrecords = glob.glob(datadir + '/l5kit_val*0.record')
+		tfrecords = L5KIT_VAL
 
 	regression = Regression(num_timesteps=num_timesteps,
 		                    num_hist_timesteps=num_hist_timesteps)
