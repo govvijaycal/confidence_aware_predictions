@@ -215,8 +215,8 @@ class ContextProviderBase:
                 continue
 
             # Use closest_idx to cut lane_str, lane_arr, lane_seg_lens
-            lane_arr_rel = self._transform_to_local_frame(x, y, yaw, lane_arr)
-            lane_arr_in_view = self._in_view(lane_arr_rel, *self.in_view_bounds)
+            lane_arr_rel_xy = self._transform_to_local_frame(x, y, yaw, lane_arr[:, :2])
+            lane_arr_in_view = self._in_view(lane_arr_rel_xy, *self.in_view_bounds)
 
             # Sanity check: this should never trigger in theory.
             if not lane_arr_in_view[closest_idx]:
@@ -382,33 +382,3 @@ class ContextProviderBase:
             return np.mean(speed_limits_mps) # Use the mean speed limit of nearby ways.
         else:
             return np.nan                    # No reliable speed limit information found.
-
-
-if __name__ == '__main__':
-    # Test the world -> local by making sure it's "invertible".
-    transform_func = ContextProviderBase._transform_to_local_frame
-
-    test_x, test_y, test_yaw             = 10., 5., 1.0
-    test_inv_x = -(test_x * np.cos(test_yaw) + test_y * np.sin(test_yaw))
-    test_inv_y = -(-test_x * np.sin(test_yaw) + test_y * np.cos(test_yaw))
-    test_inv_yaw = -test_yaw
-
-    test_points = np.array([test_x, test_y]) + \
-                  np.array([
-                             [0., 0.],
-                             [5., 0.],
-                             [-5., 0.],
-                             [0., 5.],
-                             [0., -5.],
-                             [1., 1.],
-                             [1., -1.],
-                             [-1., 1.],
-                             [-1., -1.],
-                           ])
-
-    test_points_local = transform_func(test_x, test_y, test_yaw, test_points)
-    test_points_recon = transform_func(test_inv_x, test_inv_y, test_inv_yaw, test_points_local)
-    diff = np.linalg.norm(test_points - test_points_recon, axis=-1)
-    print(f"Norms: {diff}")
-    assert np.allclose(diff, 0)
-

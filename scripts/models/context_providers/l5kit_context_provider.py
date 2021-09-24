@@ -113,7 +113,7 @@ class L5KitContextProvider(ContextProviderBase):
 
         return self.sample_function(state_idx, frames, dataset.agents, dataset.tl_faces)
 
-    def _get_candidate_lanes(self, x, y, yaw, radius):
+    def _get_candidate_lanes(self, x, y, yaw):
         # (1) Get the lane graph in the local vicinity (upper-bounding the actual view region).
         lane_indices = indices_in_bounds( np.array([x, y]), self.mapAPI.bounds_info["lanes"]["bounds"], self.view_radius )
         lane_indices = [self.mapAPI.bounds_info["lanes"]["ids"][lid] for lid in lane_indices]
@@ -149,7 +149,7 @@ class L5KitContextProvider(ContextProviderBase):
         final_lane_traversal_str, \
         final_lane_traversal_arr, \
         final_lane_traversal_seg_lens = \
-        self._truncate_lanes_in_view(x, y, yaw, radius,
+        self._truncate_lanes_in_view(x, y, yaw, self.lane_association_radius,
                                      cand_lane_traversal_str,
                                      cand_lane_traversal_arr,
                                      cand_lane_traversal_seg_lens)
@@ -256,7 +256,7 @@ class L5KitContextProvider(ContextProviderBase):
 
         # Lanes in the region:
         (lane_strs, lane_arrs, lane_seg_lens)  = \
-         self._get_candidate_lanes(x, y, yaw, self.lane_association_radius)
+         self._get_candidate_lanes(x, y, yaw)
 
         # Traffic lights
         red_traffic_lights = self._associate_traffic_lights(history_tl_faces, lane_strs, lane_seg_lens)

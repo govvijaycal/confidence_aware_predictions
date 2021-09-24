@@ -105,7 +105,7 @@ class NuScenesContextProvider(ContextProviderBase):
         yaw     = quaternion_yaw( Quaternion(annotation['rotation']) )
         return x, y, yaw
 
-    def _get_candidate_lanes(self, x, y, yaw, radius, mapname):
+    def _get_candidate_lanes(self, x, y, yaw, mapname):
         # (1) Get the lane graph in the local vicinity (upper-bounding the actual view region).
         lanes = self.maps[mapname].get_records_in_radius(x, y, self.view_radius, ["lane", "lane_connector"])
         lanes = lanes["lane"] + lanes["lane_connector"]
@@ -139,7 +139,7 @@ class NuScenesContextProvider(ContextProviderBase):
         final_lane_traversal_str, \
         final_lane_traversal_arr, \
         final_lane_traversal_seg_lens = \
-        self._truncate_lanes_in_view(x, y, yaw, radius,
+        self._truncate_lanes_in_view(x, y, yaw, self.lane_association_radius,
                                      cand_lane_traversal_str,
                                      cand_lane_traversal_arr,
                                      cand_lane_traversal_seg_lens)
@@ -190,7 +190,7 @@ class NuScenesContextProvider(ContextProviderBase):
         mapname    = self.helper.get_map_name_from_sample_token(sample_token)
 
         # Lanes in the region:
-        lane_arrs = self._get_candidate_lanes(x, y, yaw, self.lane_association_radius, mapname)
+        lane_arrs = self._get_candidate_lanes(x, y, yaw, mapname)
 
         red_traffic_lights = [np.array([False]*len(x)) for x in lane_arrs]
 
