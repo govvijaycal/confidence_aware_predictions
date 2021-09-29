@@ -11,7 +11,7 @@ This repo also has a script to run closed-loop evaluation in Carla with a ration
 To set the devkit up for dataset preparation / prediction visualization, you can do the following:
  1. git clone https://github.com/nutonomy/nuscenes-devkit
  2. Adjust the PYTHONPATH: https://github.com/nutonomy/nuscenes-devkit/blob/master/docs/installation.md#setup-pythonpath
- 3. Install requirements with conda (see envs/nuscenes_environment.yml).
+ 3. Install requirements with conda (see envs/environment.yml which unifies conda/pip install for Carla, Nuscenes, and L5Kit).
  4. Download minimal data needed for nuscenes prediction and set up following structure.  The folder containing the dataset, **nuscenes_datadir**, should have the following structure:
       - maps
         * 36092f0b03a857c6a3403e25b4b7aab3.png
@@ -44,3 +44,9 @@ To set the devkit up for dataset preparation / prediction visualization, you can
         * scene.json
         * sensor.json
         * visibility.json
+
+## Setup for L5Kit
+**TODO**
+
+## Setup for Carla
+**TODO**

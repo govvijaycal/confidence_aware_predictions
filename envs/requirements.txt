@@ -1,0 +1,65 @@
+# My custom modules.
+tslearn # for time-series clustering
+casadi  # for NMPC implementation.
+pandas  # for analysis/figures.
+pyproj  # these last two are for getting SceneContext.
+overpy==0.6
+
+# Carla leaderboard and scenario_runner.
+dictor
+requests==2.26.0 # fixing some bug with pip install
+pygame
+tabulate
+distro
+py-trees==0.8.3
+networkx==2.2
+Shapely==1.6.4.post2
+psutil
+xmlschema==1.0.18
+ephem
+# numpy (handled by Conda)
+# opencv-python (handled by l5kit list).
+
+# Copied with modification from l5kit's Pipfile (dev variant).
+pytest
+mypy
+pytest-cov
+flake8
+isort
+sphinx
+sphinx-rtd-theme
+recommonmark
+pre-commit
+importlib-metadata
+zarr
+opencv-contrib-python-headless
+pymap3d
+scipy
+tqdm
+transforms3d
+pyyaml
+matplotlib
+imageio
+notebook
+ptable
+ipywidgets
+protobuf>=3.12.2
+# torch>=1.5.0,<2.0.0 (handled by Conda)
+# torchvision>=0.6.0,<1.0.0 (handled by Conda)
+shapely
+
+# From nuscenes-devkit, requirements_base.txt.
+# requirements_prediction.txt is covered already by torch installs in Conda.
+cachetools
+descartes
+fire
+jupyter
+# matplotlib
+# numpy
+# opencv-python
+Pillow
+pyquaternion>=0.9.5
+scikit-learn
+# scipy
+# Shapely
+# tqdm

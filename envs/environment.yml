@@ -1,0 +1,20 @@
+name: conf_aware_preds
+channels:
+  - pytorch
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.7
+  - cudatoolkit=10.1.243
+  - cudnn=7.6.5
+  - tensorflow-gpu=2.2.0
+  - tensorboard
+  - pytorch=1.7.1
+  - torchvision=0.8.2
+  - numpy=1.19.5
+  - six
+  - pip
+  - pip:
+    - -r requirements.txt
+
+
