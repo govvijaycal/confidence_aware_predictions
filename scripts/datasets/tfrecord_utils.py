@@ -1,5 +1,4 @@
 import tensorflow as tf
-import tensorflow_addons as tfa
 import numpy as np
 from tqdm import tqdm
 import matplotlib.pyplot as plt
@@ -185,6 +184,9 @@ the vehicle is trying to stop for.  And motion noise would need to match
 the rasterized image history, which is not done at the moment.  Hence, it makes
 more sense to keep the raw features constant and perhaps add noise/regularization
 after the prediction features have been computed through GaussianNoise/Dropout.
+
+NOTE: we would need to install tensorflow_addons (tfa below) for using this.
+      I left this out of the conda install for now.
 """
 # Parse a single TFRecord instance with augmentation (for training).
 # def _parse_aug_function(proto):
