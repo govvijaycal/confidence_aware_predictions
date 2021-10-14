@@ -14,11 +14,6 @@ from models.ekf import EKFKinematicBase, \
                        EKFKinematicCATR, EKFKinematicCAH, \
                        EKFKinematicCVTR, EKFKinematicCVH
 
-from models.physics_oracle import constant_velocity_heading, \
-                                  constant_velocity_yaw_rate, \
-                                  constant_acceleration_heading, \
-                                  constant_acceleration_yaw_rate
-
 VEL_RANGE_THRESH = 3.0  # m/s range (~7 mph) for CV vs. CA assignment
 YR_MIN_THRESH    = 0.07 # rad/s (~4 deg/sec) rate for CH vs. CTR assignment
 

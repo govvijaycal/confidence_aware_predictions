@@ -14,8 +14,9 @@
      export PYTHONPATH="${PYTHONPATH}:<path_to_nuscenes_devkit>/python-sdk"
 
 4) Set up Carla.
-	export CARLA_ROOT = "<path_to_carla>"
-	export PYTHONPATH="${CARLA_ROOT}/PythonAPI/carla/:${PYTHONPATH}"
-	export PYTHONPATH="${CARLA_ROOT}/PythonAPI/carla/dist/<path_to_egg>:${PYTHONPATH}"
+	#export CARLA_ROOT = "<path_to_carla>"
+	#export PYTHONPATH="${CARLA_ROOT}/PythonAPI/carla/:${PYTHONPATH}"
+	#export PYTHONPATH="${CARLA_ROOT}/PythonAPI/carla/dist/<path_to_egg>:${PYTHONPATH}"
 
 	Note: the easy_install method didn't work for me, but this pythonpath modification works.
+        Note2: I use a bash script in the repo with Carla to make above path modifications (adjust_path.sh).  Only need to run this prior to running any Carla code.
