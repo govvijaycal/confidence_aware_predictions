@@ -48,11 +48,13 @@ class SceneContext:
             plt.plot(curr_lane[-1,0], curr_lane[-1,1], 'gx')
 
         # Plot other agents in the scene.
-        # TODO: use relative timestamp to adjust alpha level.
+        alpha_fn = lambda t_rel: np.clip(1.0 + t_rel, 0., 1.) # t_rel assumed to lay within -1.0 to 0.0 s
         for veh in self.vehicles:
-            plt.plot(veh[-1, 1], veh[-1, 2], 'go')
+            for pose_ind in range(veh.shape[0]):
+                plt.plot(veh[pose_ind, 1], veh[pose_ind, 2], 'go', alpha=alpha_fn(veh[pose_ind, 0]))
         for agt in self.other_agents:
-            plt.plot(agt[-1, 1], agt[-1, 2], 'bo')
+            for pose_ind in range(agt.shape[0]):
+                plt.plot(agt[pose_ind, 1], agt[pose_ind, 2], 'bo', alpha=alpha_fn(agt[pose_ind, 0]))
 
         # Plot the pose information of the agent being predicted.
         plt.plot(self.x, self.y, 'ro')
@@ -68,6 +70,7 @@ class ContextProviderBase:
         self.in_view_bounds = [-10., -25., 40., 25.] # x_min, y_min, x_max, y_max (meters)
         self.view_radius = 50. # TODO
         self.lane_association_radius = 4. # a value greater than the typical lane width (meters)
+        self.max_lane_yaw_deviation   = np.pi/2.
         self.secs_of_hist = 1.0           # how many seconds back for which to provide agent/TL info
 
     def _init_overpass(overpass_url):
@@ -198,7 +201,7 @@ class ContextProviderBase:
             # Don't consider lanes that are going in the opposite direction.
             # Threshold: keep if abs(yaw error) < 90 deg.
             yaw_diff = self._bound_angle_within_pi(lane_arr[closest_idx, 2] - yaw)
-            if np.abs(yaw_diff) >= np.pi/2.:
+            if np.abs(yaw_diff) >= self.max_lane_yaw_deviation:
                 is_proximal = False
 
             # Skip lanes for which the projected closest point exceeds the queried radius.
@@ -284,7 +287,7 @@ class ContextProviderBase:
     @staticmethod
     def _transform_to_local_frame(x_world, y_world, yaw_world, points_world):
         # Transforms a set of points in global/world frame (points_world)
-        # into the local frame described by the pose (*_world).
+        # into the local frame described by the pose ({x,y,yaw}_world).
 
         R_local_to_world = np.array([[ np.cos(yaw_world), -np.sin(yaw_world)],
                                      [ np.sin(yaw_world),  np.cos(yaw_world)]])
@@ -306,6 +309,19 @@ class ContextProviderBase:
         points_local = T_world_to_local @ points_world
         points_local = points_local[:2, :].T
         return points_local
+
+    @staticmethod
+    def _transform_poses_to_local_frame(x_world, y_world, yaw_world, poses_world):
+        # Transforms poses in global/world frame (poses_world)
+        # into the local frame described by the pose ({x,y,yaw}_world).
+        xy_local  = ContextProviderBase._transform_to_local_frame(x_world, y_world, yaw_world, poses_world[:, :2])
+        yaw_local = ContextProviderBase._bound_angle_within_pi(poses_world[:, 2] - yaw_world)
+
+        poses_local = np.copy(poses_world)
+        poses_local[:, :2] = xy_local
+        poses_local[:,  2] = yaw_local
+
+        return poses_local
 
     @staticmethod
     def _bound_angle_within_pi(ang):
