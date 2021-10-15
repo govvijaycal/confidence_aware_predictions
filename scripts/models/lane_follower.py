@@ -43,7 +43,13 @@ class LaneMotionHypothesis():
 
 class LaneFollower():
 
-    def __init__(self, dataset_name, n_max_modes = 16, ekf_cvtr_weights_path=None, **kwargs):
+    def __init__(self,
+                 dataset_name,
+                 Q_ctrl = np.eye(2),
+                 R_cost = np.eye(2),
+                 n_max_modes = 16,
+                 ekf_cvtr_weights_path=None,
+                 **kwargs):
         if dataset_name == "nuscenes":
             self.context_provider = NuScenesContextProvider()
         elif dataset_name == "l5kit":
@@ -53,8 +59,8 @@ class LaneFollower():
         self.dataset_name = dataset_name
 
         self.n_max_modes = n_max_modes
-
-        self._init_params()
+        self.R_cost = R_cost
+        self._init_fixed_params()
 
         self.ekf_cvtr = EKFKinematicCVTR()
         if ekf_cvtr_weights_path is not None:
@@ -68,11 +74,10 @@ class LaneFollower():
             self.ekf_cvtr_path = ""
             print("Using default covariance params for EKF CVTR")
 
-        self.lane_ekf = LaneEKF(Q_u = self.Q_ctrl,
+        self.lane_ekf = LaneEKF(Q_u = Q_ctrl,
                                 R_lane_frame = self.lane_projection_covar)
 
-    def _init_params(self):
-        # TODO: Clean up and document.
+    def _init_fixed_params(self):
         if self.dataset_name == "l5kit":
             self.n_assoc_pred_timesteps = 2 # 0.4 seconds
         elif self.dataset_name == "nuscenes":
@@ -80,12 +85,10 @@ class LaneFollower():
         else:
             raise NotImplementedError(f"{self.dataset_name} not implemented.")
 
-        self.lane_projection_covar = np.diag([0.3, 1.5, 0.5]) # FROM PAPER, CITE TODO
-        self.Q_ctrl = np.diag([1, 1])
-        self.R_cost = np.diag([1, 10])
+        self.lane_projection_covar = np.diag([0.3, 1.5, 0.5]) # Taken from Eqn 33, https://doi.org/10.1109/ITSC.2013.6728549
+        self.lane_width    = self.context_provider.lane_association_radius # width to be considered in the same lane
 
-        self.lane_width = 4.0    # m (overapproximate of standard 3.7 m width)
-        self.lat_accel_max = 4.0 # m/s^2, based on https://doi.org/10.3390/electronics8090943
+        self.lat_accel_max = 4.0 # m/s^2, based on https://doi.org/10.3390/electronics8090943 (used to limit v_des)
 
         # IDM params, picking from Table 11.2 of Traffic Flow Dynamics book.  These correspond to typical
         # parameters in urban traffic environments.
@@ -102,12 +105,26 @@ class LaneFollower():
         self.x_la       = 14.2   # lookahead distance, m
 
     def save_weights(self, path):
-        # TODO
-        raise NotImplementedError
+        model_dict = {}
+        model_dict["n_max_modes"]   = self.n_max_modes
+        model_dict["ekf_cvtr_path"] = self.ekf_cvtr_path
+        model_dict["Q_ctrl"]        = self.lane_ekf.Q_u
+        model_dict["R_cost"]        = self.R_cost
+
+        pickle.dump(model_dict, open(path, 'wb'))
 
     def load_weights(self, path):
-        # TODO
-        raise NotImplementedError
+        path = path if '.pkl' in path else (path + '.pkl')
+        model_dict = pickle.load(open(path, 'rb'))
+
+        assert model_dict["n_max_modes"] == self.n_max_modes
+
+        self.ekf_cvtr_path = model_dict["ekf_cvtr_path"]
+        self.ekf_cvtr.load_weights(self.ekf_cvtr_path)
+
+        self.lane_ekf.update_Q_u(model_dict["Q_ctrl"])
+
+        self.R_cost = model_dict["R_cost"]
 
     def _preprocess_entry(self, entry, split_name, mode="predict", debug=False):
         """ Given a dataset entry from a tfrecord, returns the motion history and associated scene context.
@@ -143,6 +160,11 @@ class LaneFollower():
 
         return entry_proc
 
+    """
+    ===========================================================================================================
+    Helper (Static) Methods
+    ===========================================================================================================
+    """
     @staticmethod
     def _identify_split_name(dataset_name, dataset):
         # Check the split and ensure consistency with our context provider.
@@ -177,158 +199,10 @@ class LaneFollower():
                                f"the tfrecord set: {dataset}")
         return split_name
 
-    def get_prior_lane_association(self, entry_proc):
-        """ The purpose of this function is to get a prior probability distribution over
-            lanes by using distance of short-term predicted poses (using prior motion) to
-            the lanes.  This portion doesn't consider any control policies / lane-following behavior.
-
-            Key class parameters:
-              - self.n_assoc_pred_timesteps: how many future timesteps to propagate before lane association
-              - self.lane_projection_covar: models error in lane projection (e.g. due to lane discretization)
-              - self.lane_maha_dist_sq_thresh: maximum value for which the lane is considered likely + considered.
-        """
-
-        # Filter the prior motion.
-        filter_dict = self.ekf_cvtr.filter(entry_proc["prior_tms"], entry_proc["prior_poses"])
-
-        # Do short-term prediction to guess the vehicle's pose in n_assoc_pred_timesteps.
-        future_dts = np.append([entry_proc["future_tms"][0]],
-                                np.diff(entry_proc["future_tms"]))
-
-        for k in range(self.n_assoc_pred_timesteps):
-            z, P, _ = self.ekf_cvtr.time_update(future_dts[k])
-
-        # This is in local frame (vehicle coordinate system at current timestep).
-        z_local_pose = z[:3]
-        P_local_pose = P[:3, :3]
-
-        # Project to closest point on each lane, get squared Mahalanobis distance,
-        # and decide whether to keep/prune this lane candidate.
-        lane_assoc_priors = []
-        sc = entry_proc["scene_context"]
-
-        for lane in sc.lanes:
-
-            lane_poses_local = self.context_provider._transform_poses_to_local_frame(sc.x, sc.y, sc.yaw, lane[:, :3])
-
-            lane_xy_local  = lane_poses_local[:, :2]
-            lane_yaw_local = lane_poses_local[:,  2]
-
-            lane_dists = np.linalg.norm(z_local_pose[:2] - lane_xy_local , axis=1)
-            closest_lane_ind = np.argmin(lane_dists)
-
-            xy_residual_local  = z_local_pose[:2] - lane_xy_local[closest_lane_ind]
-            yaw_residual_local = self.context_provider._bound_angle_within_pi(z_local_pose[2] - lane_yaw_local[closest_lane_ind])
-
-            pose_residual_local = np.append(xy_residual_local, yaw_residual_local)
-
-            lane_projection_covar_local = np.copy(self.lane_projection_covar)
-            lane_alp_yaw = lane_yaw_local[closest_lane_ind]
-            R = np.array([[np.cos(lane_alp_yaw), -np.sin(lane_alp_yaw)],
-                          [np.sin(lane_alp_yaw),  np.cos(lane_alp_yaw)]])
-
-            lane_projection_covar_local[:2, :2] = R @ lane_projection_covar_local[:2, :2] @ R.T
-            pose_residual_covar_local = P_local_pose + lane_projection_covar_local
-
-            d_M_sq = pose_residual_local.T @ \
-                     np.linalg.pinv(pose_residual_covar_local) @ \
-                     pose_residual_local
-
-            lane_assoc_priors.append( np.exp(-d_M_sq) )
-
-
-        # Return normalized lane probabilities.
-        lane_assoc_priors = np.array(lane_assoc_priors)
-
-        if np.sum(lane_assoc_priors) == 0:
-            import pdb; pdb.set_trace()
-
-        return lane_assoc_priors / np.sum(lane_assoc_priors)
-
-    def get_lane_motion_hypotheses(self, entry_proc, prior_lane_probs=None):
-        # Filter this agent's motion to get initial state.
-        filter_dict = self.ekf_cvtr.filter(entry_proc["prior_tms"], entry_proc["prior_poses"])
-        z_cvtr_init = filter_dict["states_ms"][-1] # z_{0|0} where 0 = current time
-        P_cvtr_init = filter_dict["covars_ms"][-1] # P_{0|0} ""
-
-        sc = entry_proc["scene_context"]
-
-        future_tms = entry_proc["future_tms"]
-        future_dts = np.append([future_tms[0]], np.diff(future_tms))
-
-        # # DEBUG_TMP
-        # import matplotlib.pyplot as plt
-        # plt.figure(1)
-        # sc.plot()
-        # self.context_provider.plot_view(sc.x, sc.y, sc.yaw)
-        # plt.axis("equal")
-        # # DEBUG_TMP
-
-        # Handle vehicles with simple CVTR predictions, after transforming into this vehicle's local frame.
-        veh_agent_preds = []
-        for veh_arr in sc.vehicles:
-            # [t, x, y, theta]
-            veh_arr_local = np.copy(veh_arr)
-            veh_poses_local = self.context_provider._transform_poses_to_local_frame(sc.x, sc.y, sc.yaw, veh_arr[:, 1:4])
-            veh_arr_local[:, 1:4] = veh_poses_local
-            veh_agent_preds.append( self._extrapolate_pose_trajs(self._cvtr_step_fn, veh_arr_local, future_dts) )
-
-        other_agent_preds = []
-        for agt_arr in sc.other_agents:
-            # [t, x, y, theta]
-            agt_arr_local = np.copy(agt_arr)
-            agt_poses_local = self.context_provider._transform_poses_to_local_frame(sc.x, sc.y, sc.yaw, agt_arr[:, 1:4])
-            agt_arr_local[:, 1:4] = agt_poses_local
-            other_agent_preds.append( self._extrapolate_pose_trajs(self._cvh_step_fn, agt_arr_local, future_dts) )
-
-        # # DEBUG_TMP
-        # plt.figure(2)
-        # N = len(future_dts)
-
-        # for pred in veh_agent_preds:
-        #     plt.plot(pred[:, 0], pred[:, 1], 'g.')
-        #     plt.plot(pred[0, 0], pred[0, 1], 'go')
-
-        # for pred in other_agent_preds:
-        #     plt.plot(pred[:, 0], pred[:, 1], 'b.')
-        #     plt.plot(pred[0, 0], pred[0, 1], 'bo')
-        # # DEBUG_TMP
-
-        # If given prior_lane_probs, we can save time by not computing rollouts for pruned lanes (P = 0).
-        if prior_lane_probs is None:
-            lanes_to_consider = range(len(sc.lanes))
-        else:
-            lanes_to_consider = [ind for (ind, prob) in enumerate(prior_lane_probs) if prob > 0]
-
-        lane_motion_hypotheses = []
-        for lane_idx in range(len(sc.lanes)):
-            if lane_idx not in lanes_to_consider:
-                lmh = None
-            else:
-                lane   = np.copy(sc.lanes[lane_idx])
-                red_tl = np.copy(sc.red_traffic_lights[lane_idx])
-
-                # Convert lane into vehicle local frame for consistency with z/P.
-                # [x, y, theta, v]
-                lane_poses_local = self.context_provider._transform_poses_to_local_frame(sc.x, sc.y, sc.yaw, lane[:, :3])
-                lane[:, :3]    = lane_poses_local
-                lmh = self._get_lane_rollout(z_cvtr_init, P_cvtr_init, future_tms, lane, red_tl, veh_agent_preds, other_agent_preds)
-
-            lane_motion_hypotheses.append(lmh)
-
-        # # DEBUG_TMP
-        # for lmh in lane_motion_hypotheses:
-        #     traj = np.array(lmh.zs)
-        #     plt.plot(traj[:,0], traj[:,1], 'r.')
-        # plt.plot(0, 0, 'rx')
-        # plt.axis("equal")
-        # plt.show()
-        # # DEBUG_TMP
-
-        return lane_motion_hypotheses
-
     @staticmethod
     def _extrapolate_pose_trajs(step_fn, pose_traj, dts):
+        # This function provides basic predictions based on step_fn over the horizon given by dts.
+        # step_fn defines the one-step integration (e.g., CVH or CVTR) function
         # pose_traj is M by 4, each row containing [t, x, y, theta].
         # dts is a vector containing seconds between timesteps.
 
@@ -373,9 +247,9 @@ class LaneFollower():
 
             return poses_vel
 
+        N = len(dts)
         if pose_traj.shape[0] == 1:
             # We assume a constant pose / zero velocity trajectory if only given a single pose.
-            N = len(dts)
             poses     =  np.tile(pose_traj[:, 1:], (N, 1))
             poses_vel = np.concatenate( ( poses, np.zeros((N,2)) ), axis=1 )
         else:
@@ -392,29 +266,213 @@ class LaneFollower():
             # Extrapolate for N steps with time discretization dt.
             poses_vel = get_future_poses(step_fn, pose_last, v_est, w_est, dts)
 
-        assert poses_vel.shape[1] == 5
+        assert poses_vel.shape == (N, 5)
         return poses_vel # [x_t, y_t, theta_t, v_t, w_t] for t in [1, N]
 
-    # The CVTR 1-step integration function.
     @staticmethod
     def _cvtr_step_fn(x, y, th, v, w, dt):
+        # The CVTR 1-step integration function.
         xn  =  x + dt * (v * np.cos(th))
         yn  =  y + dt * (v * np.sin(th))
         thn = th + dt * (w)
         return xn, yn, thn
 
-    # The CVH 1-step integration function.
     @staticmethod
     def _cvh_step_fn(x, y, th, v, w, dt):
+        # The CVH 1-step integration function.
         xn  =  x + dt * (v * np.cos(th))
         yn  =  y + dt * (v * np.sin(th))
         thn = th
         return xn, yn, thn
 
+    @staticmethod
+    def _identify_lead_agent(step_ind, s_curr, lane_width, lane_localizer, veh_preds, other_agent_preds):
+        # This function determines a single agent (if it exists) we should consider for the IDM model.
+        # step_ind indicates the timestep to consider in the trajectories given byveh_preds/other_agent_preds.
+        # s_curr is the location of the "ego" agent -> s values greater than this are considered in "front".
+        # lane_width is used to filter out agents that are not in the same lane as the "ego" agent.
+        # lane_localizer is a helper class used to identify lane coordinate projections.
+        # *_preds are lists of N by 5 trajectories (see _extrapolate_pose_trajs) for nearby agents to consider.
+
+        def get_lane_projection(x, y, th, v, lane_localizer):
+            # Returns the lane (error) coordinates and lane-aligned velocity.
+            s, ey, epsi = lane_localizer.convert_global_to_frenet_coords(x, y, th, extrapolate_s = True)
+            v_lane = v * np.cos(epsi) # projection of the agent's velocity along the lane direction.
+            return s, ey, epsi, v_lane
+
+        s_lead, v_lead = np.nan, np.nan # np.nan used to indicate lack of a lead agent
+        all_agt_preds = veh_preds + other_agent_preds  # combined predictions for all agents
+        agent_pq = [] # priority queue to rank relevant agents and pick the "closest" one in front
+
+        for agt_pred in all_agt_preds:
+            agt_state = agt_pred[step_ind, :] # [x_t, y_t, theta_t, v_t, w_t]
+            agt_x, agt_y, agt_th, agt_v, _ = agt_state
+
+            s_agt, ey_agt, epsi_agt, v_lane = get_lane_projection(agt_x, agt_y, agt_th, agt_v, lane_localizer)
+
+            if s_agt > s_curr and np.abs(ey_agt) < 0.5*lane_width:
+                # If the agent is in front of us and in the same lane, it's relevant to us.
+                heapq.heappush(agent_pq, (s_agt, v_lane))
+
+        if len(agent_pq) > 0:
+            # If any relevant agents exist, choose the agent that's the closest in s in front of us.
+            s_lead, v_lead = agent_pq[0]
+
+        return s_lead, v_lead
+
+    """
+    ===========================================================================================================
+    Lane Follower Model Implementation
+    ===========================================================================================================
+    """
+    def get_prior_lane_association(self, entry_proc):
+        """ The purpose of this function is to get a prior probability distribution over
+            lanes by using distance of short-term predicted poses (using prior motion) to
+            the lanes.  This portion doesn't consider any control policies / lane-following behavior.
+        """
+
+        # Filter the prior motion.
+        filter_dict = self.ekf_cvtr.filter(entry_proc["prior_tms"], entry_proc["prior_poses"])
+
+        # Do short-term prediction to guess the vehicle's pose in n_assoc_pred_timesteps.
+        future_dts = np.append([entry_proc["future_tms"][0]],
+                                np.diff(entry_proc["future_tms"]))
+
+        for k in range(self.n_assoc_pred_timesteps):
+            z, P, _ = self.ekf_cvtr.time_update(future_dts[k])
+
+        # This is in local frame (vehicle coordinate system at current timestep).
+        z_local_pose = z[:3]
+        P_local_pose = P[:3, :3]
+
+        # Project to closest point on each lane, get squared Mahalanobis distance,
+        # and decide whether to keep/prune this lane candidate.
+        lane_assoc_priors = []
+        sc = entry_proc["scene_context"]
+
+        for lane in sc.lanes:
+
+            # Get the lane coordinates in vehicle local frame.
+            lane_poses_local = self.context_provider._transform_poses_to_local_frame(sc.x, sc.y, sc.yaw, lane[:, :3])
+            lane_xy_local  = lane_poses_local[:, :2]
+            lane_yaw_local = lane_poses_local[:,  2]
+
+            # Find the nearest lane point ("active lane point").
+            lane_dists = np.linalg.norm(z_local_pose[:2] - lane_xy_local , axis=1)
+            closest_lane_ind = np.argmin(lane_dists)
+
+            # Residual between vehicle and lane active point (in vehicle local frame).
+            xy_residual_local  = z_local_pose[:2] - lane_xy_local[closest_lane_ind]
+            yaw_residual_local = self.context_provider._bound_angle_within_pi(z_local_pose[2] - lane_yaw_local[closest_lane_ind])
+            pose_residual_local = np.append(xy_residual_local, yaw_residual_local)
+
+            # Get the lane projection covariance in vehicle frame (accounting for yaw rotation).
+            lane_projection_covar_local = np.copy(self.lane_projection_covar)
+            lane_alp_yaw = lane_yaw_local[closest_lane_ind]
+            R = np.array([[np.cos(lane_alp_yaw), -np.sin(lane_alp_yaw)],
+                          [np.sin(lane_alp_yaw),  np.cos(lane_alp_yaw)]])
+            lane_projection_covar_local[:2, :2] = R @ lane_projection_covar_local[:2, :2] @ R.T
+
+            # Get the residual covariance (pose measurement + lane measurement errors combined).
+            pose_residual_covar_local = P_local_pose + lane_projection_covar_local
+
+            # Find Mahalanobis distance squared of pose residual according to our specified distribution.
+            d_M_sq = pose_residual_local.T @ \
+                     np.linalg.pinv(pose_residual_covar_local) @ \
+                     pose_residual_local
+
+            # Prior probability based on Mahalanobis distance squared (closer to zero = high prior prob).
+            lane_assoc_priors.append( np.exp(-d_M_sq) )
+
+        # Return normalized lane probabilities.
+        lane_assoc_priors = np.array(lane_assoc_priors)
+        assert np.sum(lane_assoc_priors) > 0.
+        return lane_assoc_priors / np.sum(lane_assoc_priors)
+
+    def get_lane_motion_hypotheses(self, entry_proc, prior_lane_probs=None):
+        # Filter this agent's motion to get initial state.
+        filter_dict = self.ekf_cvtr.filter(entry_proc["prior_tms"], entry_proc["prior_poses"])
+        z_cvtr_init = filter_dict["states_ms"][-1] # z_{0|0} where 0 = current time
+        P_cvtr_init = filter_dict["covars_ms"][-1] # P_{0|0} ""
+
+        sc = entry_proc["scene_context"]
+
+        future_tms = entry_proc["future_tms"]
+        future_dts = np.append([future_tms[0]], np.diff(future_tms))
+
+        # Handle vehicles with simple CVTR predictions, after transforming into this vehicle's local frame.
+        veh_agent_preds = []
+        for veh_arr in sc.vehicles:
+            # [t, x, y, theta]
+            veh_arr_local = np.copy(veh_arr)
+            veh_poses_local = self.context_provider._transform_poses_to_local_frame(sc.x, sc.y, sc.yaw, veh_arr[:, 1:4])
+            veh_arr_local[:, 1:4] = veh_poses_local
+            veh_agent_preds.append( self._extrapolate_pose_trajs(self._cvtr_step_fn, veh_arr_local, future_dts) )
+
+        # Handle non-vehicle agents with simple CVH predictions, after transforming into this vehicle's local frame.
+        other_agent_preds = []
+        for agt_arr in sc.other_agents:
+            # [t, x, y, theta]
+            agt_arr_local = np.copy(agt_arr)
+            agt_poses_local = self.context_provider._transform_poses_to_local_frame(sc.x, sc.y, sc.yaw, agt_arr[:, 1:4])
+            agt_arr_local[:, 1:4] = agt_poses_local
+            other_agent_preds.append( self._extrapolate_pose_trajs(self._cvh_step_fn, agt_arr_local, future_dts) )
+
+        # If given prior_lane_probs, we can save time by not computing rollouts for pruned lanes (P = 0).
+        if prior_lane_probs is None:
+            lanes_to_consider = range(len(sc.lanes))
+        else:
+            lanes_to_consider = [ind for (ind, prob) in enumerate(prior_lane_probs) if prob > 0]
+
+        lane_motion_hypotheses = []
+        for lane_idx in range(len(sc.lanes)):
+            if lane_idx not in lanes_to_consider:
+                lmh = None
+            else:
+                lane   = np.copy(sc.lanes[lane_idx])
+                red_tl = np.copy(sc.red_traffic_lights[lane_idx])
+
+                # Convert lane into vehicle local frame for consistency with z/P.
+                # [x, y, theta, v]
+                lane_poses_local = self.context_provider._transform_poses_to_local_frame(sc.x, sc.y, sc.yaw, lane[:, :3])
+                lane[:, :3]    = lane_poses_local
+                lmh = self._get_lane_rollout(z_cvtr_init, P_cvtr_init, future_tms, lane, red_tl, veh_agent_preds, other_agent_preds)
+
+            lane_motion_hypotheses.append(lmh)
+
+        return lane_motion_hypotheses
+
+    def get_posterior_lane_association(self, prior_lane_probs, lane_motion_hypotheses):
+        # Evaluate the tracking costs.
+        cost_likelihoods = []
+
+        for lmh in lane_motion_hypotheses:
+            if lmh is None:
+                cost_likelihoods.append(0.)
+            else:
+                u_comb  = np.column_stack((lmh.u_accs, lmh.u_curvs))
+                costs   = np.sum([u.T @ self.R_cost @ u for u in u_comb])
+                cost_likelihoods.append( np.exp(-np.sum(costs)) )
+
+        # Compute posterior lane probabilities.
+        cost_likelihoods = np.array(cost_likelihoods)
+        posterior_lane_probs = cost_likelihoods * prior_lane_probs / np.dot(cost_likelihoods, prior_lane_probs)
+        return posterior_lane_probs
+
+    def truncate_num_modes(self, probs, lmhs):
+        top_mode_inds = np.argsort(probs)[-self.n_max_modes:]
+        top_mode_inds = [x for x in top_mode_inds if probs[x] > 0.]
+
+        probs_final = np.array([probs[x] for x in top_mode_inds])
+        probs_final = probs_final / np.sum(probs_final)
+        lmhs_final  = [lmhs[x] for x in top_mode_inds]
+
+        return probs_final, lmhs_final
+
     def _get_acceleration_idm(self, s_curr, v_curr, v_des, s_lead=np.nan, v_lead=np.nan):
             # Applies the Intelligent Driver Model to get the next acceleration input.
             # Reference: Traffic Flow Dynamics, Trieber and Kesting, 2013.  Ch 11.3.
-            vel_ratio = v_curr / v_des
+            vel_ratio = v_curr / max(0.1, v_des)
 
             if np.isnan(v_lead) or np.isnan(s_lead):
                 # Free driving case, nothing to worry about braking for.
@@ -425,7 +483,7 @@ class LaneFollower():
                 gap_des   = self.min_gap + v_curr * max(0, self.T_gap + delta_v / (2 * np.sqrt(self.a_max * self.b_decel)))
 
                 gap_curr  = s_lead - s_curr
-                gap_ratio = gap_des / gap_curr
+                gap_ratio = gap_des / max(0.1, gap_curr)
 
                 a_idm = self.a_max * (1 - (vel_ratio)**4 - gap_ratio**2)
 
@@ -441,39 +499,8 @@ class LaneFollower():
         curv_fb = -self.k_curv_fb * (e_y + self.x_la * e_psi)
         return curv_ff + curv_fb
 
-    @staticmethod
-    def _identify_lead_agent(step_ind, s_curr, lane_width, lane_localizer, veh_preds, other_agent_preds):
-
-        def get_lane_projection(x, y, th, v, lane_localizer):
-            s, ey, epsi = lane_localizer.convert_global_to_frenet_coords(x, y, th, extrapolate_s = True)
-            v_lane = v * np.cos(epsi) # projection of the agent's velocity along the lane direction.
-            return s, ey, epsi, v_lane
-
-        s_lead, v_lead = np.nan, np.nan
-        agent_pq = []
-        all_agt_preds = veh_preds + other_agent_preds
-
-        for agt_pred in all_agt_preds:
-            # [x_t, y_t, theta_t, v_t, w_t]
-            agt_state = agt_pred[step_ind, :]
-            agt_x, agt_y, agt_th, agt_v, _ = agt_state
-
-            s_agt, ey_agt, epsi_agt, v_lane = get_lane_projection(agt_x, agt_y, agt_th, agt_v, lane_localizer)
-
-            if s_agt > s_curr and np.abs(ey_agt) < 0.5*lane_width:
-                # If the agent is in front of us and in the same lane, it's relevant to us.
-                heapq.heappush(agent_pq, (s_agt, v_lane))
-
-        if len(agent_pq) > 0:
-            # If any relevant agents exist, choose the agent that's the closest in s in front of us.
-            s_lead, v_lead = agent_pq[0]
-
-        return s_lead, v_lead
-
     def _get_lane_rollout(self, z_cvtr_init, P_cvtr_init, future_tms, lane, red_tl, veh_agent_preds, other_agent_preds):
-        # First we need to see which of veh_agent_preds, other_agent_preds are relevant.
-        # We should filter out agents that are too far away.
-        # And we should assume that lead vehicles will remain lead vehicles.  Ped that have crossed will not be relevant.
+        # Given a specified lane and processed scene context, returns a single Gaussian trajectory for lane following behavior.
 
         # If we don't have speed limit info, best guess of the reference speed is the vehicle's current filtered speed.
         inds_no_speed_limit = np.argwhere( np.isnan(lane[:, 3]) )
@@ -486,17 +513,18 @@ class LaneFollower():
             tl_active_ind = np.amin(lane_inds_with_red_tl)
             lane[tl_active_ind:, 3] = 0.
 
+        # Lane localizer used to handle projections of agents to lane coordinates.
         lane_localizer = LaneLocalizer(lane[:,0], lane[:,1], lane[:,2], lane[:,3])
 
-        u_accs  = []
-        u_curvs = []
-        zs      = []
-        Ps      = []
+        u_accs  = [] # acceleration control trajectory
+        u_curvs = [] # curvature control trajectory
+        zs      = [] # state mean trajectory
+        Ps      = [] # state covariance trajectory
 
         # Get initial kinematic state for our context-aware lane rollout.
         # We ignore angular velocity since curvature is an input in the LaneEKF model.
-        z_curr = z_cvtr_init[:4]
-        P_curr = P_cvtr_init[:4,:4]
+        z_curr = z_cvtr_init[:4]    # [x, y, th, v]
+        P_curr = P_cvtr_init[:4,:4] # covariance associated with z_curr
 
         dts = np.append([future_tms[0]], np.diff(future_tms))
 
@@ -531,8 +559,11 @@ class LaneFollower():
             u_accs.append(u_acc)
             u_curvs.append(u_curv)
             u = [u_acc, u_curv]
-            self.lane_ekf.time_update(u, dt)
-            z_curr, P_curr, _, _ = self.lane_ekf.measurement_update(lane_localizer)
+
+            z_curr, P_curr, _, _ = self.lane_ekf.time_update(u, dt)
+            if s < lane_localizer.lane_length:
+                # Use the lane pseudo-measurement if available.
+                z_curr, P_curr, _, _ = self.lane_ekf.measurement_update(lane_localizer)
 
             zs.append(z_curr)
             Ps.append(P_curr)
@@ -540,41 +571,15 @@ class LaneFollower():
         return LaneMotionHypothesis(ts=future_tms,
                                     u_accs=u_accs,
                                     u_curvs=u_curvs,
-                                    Q_u=self.Q_ctrl,
+                                    Q_u=self.lane_ekf.Q_u,
                                     zs=zs,
                                     Ps=Ps)
 
-    def get_posterior_lane_association(self, prior_lane_probs, lane_motion_hypotheses):
-        # Evaluate the tracking costs.
-        cost_likelihoods = []
-
-        for lmh in lane_motion_hypotheses:
-            if lmh is None:
-                cost_likelihoods.append(0.)
-            else:
-                u_comb  = np.column_stack((lmh.u_accs, lmh.u_curvs))
-                costs   = np.sum([u.T @ self.R_cost @ u for u in u_comb])
-                cost_likelihoods.append( np.exp(-np.sum(costs)) )
-
-        # Compute posterior lane probabilities.
-        cost_likelihoods = np.array(cost_likelihoods)
-        posterior_lane_probs = cost_likelihoods * prior_lane_probs / np.dot(cost_likelihoods, prior_lane_probs)
-        return posterior_lane_probs
-
-    def truncate_num_modes(self, probs, lmhs):
-        top_mode_inds = np.argsort(probs)[-self.n_max_modes:]
-        top_mode_inds = [x for x in top_mode_inds if probs[x] > 0.]
-
-        probs_final = probs[top_mode_inds] / np.sum( probs[top_mode_inds] )
-        lmhs_final  = [lmhs[x] for x in top_mode_inds]
-
-        return probs_final, lmhs_final
-
     """
     ===========================================================================================================
+    Prediction
     ===========================================================================================================
     """
-
     def predict(self, dataset):
         ''' Returns a dictionary of predictions given a set of tfrecords. '''
         predict_dict = {}
@@ -585,7 +590,7 @@ class LaneFollower():
         num_instances_without_context = 0
 
         for entry in tqdm(dataset):
-            entry_proc  = self._preprocess_entry(entry, split_name, mode="predict")
+            entry_proc  = self._preprocess_entry(entry, split_name, mode="predict", debug=True)
 
             if len(entry_proc["scene_context"].lanes) > 0:
                 # Make lane context-aware predictions using a Bayesian framework.
@@ -654,14 +659,14 @@ class LaneFollower():
 
     """
     ===========================================================================================================
+    Training
     ===========================================================================================================
     """
-
     def fit(self, train_set, val_set, logdir=None, **kwargs):
         raise NotImplementedError
 
 if __name__ == '__main__':
-    dataset_choice = "nuscenes"
+    dataset_choice = "l5kit"
 
     if dataset_choice == "nuscenes":
         dataset    = [NUSCENES_VAL[0]]

@@ -14,16 +14,22 @@ class LaneEKF():
         self.P = np.eye(self.nx)   # covariance
 
         # Input covariance
-        assert Q_u.shape == (self.nu, self.nu)
-        assert np.allclose(Q_u, Q_u.T)
-        assert np.linalg.det(Q_u) > 0.
-        self.Q_u = Q_u
+        self.update_Q_u(Q_u)
 
         # Measurement covariance (lane waypoint ID)
         assert R_lane_frame.shape == (self.nm, self.nm)
         assert np.allclose(R_lane_frame, R_lane_frame.T)
         assert np.linalg.det(R_lane_frame) > 0.
         self.R_lane_frame = R_lane_frame
+
+    def update_Q_u(self, Q_u):
+        # In theory, this should just be called once by the constructor.
+        # For fitting this parameter, we may want to pick a different
+        # candidate value,which is what this function is useful for.
+        assert Q_u.shape == (self.nu, self.nu)
+        assert np.allclose(Q_u, Q_u.T)
+        assert np.linalg.det(Q_u) > 0.
+        self.Q_u = Q_u
 
     def time_update(self, u, dt):
         A = self._dynamics_state_jacobian(self.z, u, dt)
