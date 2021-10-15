@@ -8,18 +8,21 @@ from dataclasses import dataclass
 from typing import List
 import heapq
 
-from context_providers.l5kit_context_provider import L5KitContextProvider
-from context_providers.nuscenes_context_provider import NuScenesContextProvider
-from lane_utils.lane_ekf import LaneEKF
-from lane_utils.lane_localizer import LaneLocalizer
-
 scriptdir = os.path.abspath(__file__).split('scripts')[0] + 'scripts/'
 sys.path.append(scriptdir)
+
+from models.context_providers.l5kit_context_provider import L5KitContextProvider
+from models.context_providers.nuscenes_context_provider import NuScenesContextProvider
+from models.lane_utils.lane_ekf import LaneEKF
+from models.lane_utils.lane_localizer import LaneLocalizer
+from models.ekf import EKFKinematicBase, EKFKinematicCVTR
+
 from datasets.tfrecord_utils import _parse_no_img_function
 from datasets.pose_utils import angle_mod_2pi as bound_angle_within_pi
 from datasets.splits import NUSCENES_TRAIN, NUSCENES_VAL, NUSCENES_TEST, \
                             L5KIT_TRAIN, L5KIT_VAL, L5KIT_TEST
-from models.ekf import EKFKinematicBase, EKFKinematicCVTR
+
+from evaluation.prediction_metrics import compute_trajectory_metrics
 
 @dataclass(frozen=True)
 class LaneMotionHypothesis():
@@ -663,25 +666,63 @@ class LaneFollower():
     ===========================================================================================================
     """
     def fit(self, train_set, val_set, logdir=None, **kwargs):
-        raise NotImplementedError
+        ''' Fit params (self.lane_ekf.Q_u and self.R_cost) based on a subset of the train_set. '''
 
-if __name__ == '__main__':
-    dataset_choice = "l5kit"
+        # Deterministically pick out a subset of the training set to fit on.
+        np.random.seed(0)
+        np.random.shuffle(train_set)
+        train_set = train_set[:20]
 
-    if dataset_choice == "nuscenes":
-        dataset    = [NUSCENES_VAL[0]]
-        lf = LaneFollower("nuscenes")
+        # Step 1.  Fit Q_u based on the log-likelihood of the most likely mode (with R_cost fixed).
+        sigma_acc_sq_cands  = [1e-2, 1e-1, 1e0]
+        sigma_curv_sq_cands = [1e-4, 1e-3, 1e-2]
+        ll_fit_list = []
 
-    elif dataset_choice == "l5kit":
-        dataset    = [L5KIT_VAL[0]]
-        lf = LaneFollower("l5kit")
-    else:
-        raise NotImplementedError
+        for sigma_acc_sq in sigma_acc_sq_cands:
+            for sigma_curv_sq in sigma_curv_sq_cands:
+                Q_eval = np.diag([sigma_acc_sq, sigma_curv_sq])
+                self.lane_ekf.update_Q_u(Q_eval)
+                predict_dict = self.predict(train_set)
+                metrics_df = compute_trajectory_metrics(predict_dict, ks_eval=[1])
 
-    lf.predict(dataset)
+                ll_result = np.mean(metrics_df.traj_LL_1)
+                ll_fit_list.append( [ll_result, sigma_acc_sq, sigma_curv_sq] )
 
-    # split_name = lf._identify_split_name(dataset_choice, dataset)
-    # dataset = tf.data.TFRecordDataset(dataset)
-    # dataset = dataset.map(_parse_no_img_function)
-    # for entry in tqdm(dataset):
-    #     entry_proc  = lf._preprocess_entry(entry, split_name, mode="predict", debug=True)
+        ll_fit_list = np.array(ll_fit_list)
+        print("Q", ll_fit_list)
+        best_fit_ind       = np.argmax( ll_fit_list[:, 0] )
+        best_sigma_acc_sq  = ll_fit_list[best_fit_ind, 1]
+        best_sigma_curv_sq = ll_fit_list[best_fit_ind, 2]
+        self.lane_ekf.update_Q_u( np.diag([best_sigma_acc_sq,
+                                           best_sigma_curv_sq]) )
+
+        print(f"BEST Q_u: {self.lane_ekf.Q_u}")
+
+        # Step 2.  If we have a multimodal model, fit R_cost based on 5 (max) modes log-likelihood.
+        if self.n_max_modes > 1:
+            R_cost_accs  = [1e-4, 1e-2, 1]
+            R_cost_curvs = [1e-2,  1e0, 1e2]
+
+            ll_fit_list = []
+            for R_acc in R_cost_accs:
+                for R_curv in R_cost_curvs:
+                    self.R_cost = np.diag([R_acc, R_curv])
+                    predict_dict = self.predict(train_set)
+                    metrics_df = compute_trajectory_metrics(predict_dict, ks_eval=[5])
+
+                    ll_result = np.mean(metrics_df.traj_LL_5)
+                    ll_fit_list.append( [ll_result, R_acc, R_curv] )
+
+            ll_fit_list = np.array(ll_fit_list)
+            print("R", ll_fit_list)
+            best_fit_ind = np.argmax( ll_fit_list[:, 0] )
+            R_acc_best   = ll_fit_list[best_fit_ind, 1]
+            R_curv_best  = ll_fit_list[best_fit_ind, 2]
+            self.R_cost = np.diag( [R_acc_best, R_curv_best] )
+
+        print(f"BEST R_cost: {self.R_cost}")
+
+        if logdir is not None:
+            os.makedirs(logdir, exist_ok=True)
+            filename = logdir + 'params.pkl'
+            self.save_weights(filename)
