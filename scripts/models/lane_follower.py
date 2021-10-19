@@ -687,9 +687,9 @@ class LaneFollower():
 
                 ll_result = np.mean(metrics_df.traj_LL_1)
                 ll_fit_list.append( [ll_result, sigma_acc_sq, sigma_curv_sq] )
+                print("Q eval: ", ll_fit_list[-1])
 
         ll_fit_list = np.array(ll_fit_list)
-        print("Q", ll_fit_list)
         best_fit_ind       = np.argmax( ll_fit_list[:, 0] )
         best_sigma_acc_sq  = ll_fit_list[best_fit_ind, 1]
         best_sigma_curv_sq = ll_fit_list[best_fit_ind, 2]
@@ -698,27 +698,26 @@ class LaneFollower():
 
         print(f"BEST Q_u: {self.lane_ekf.Q_u}")
 
-        # Step 2.  If we have a multimodal model, fit R_cost based on 5 (max) modes log-likelihood.
-        if self.n_max_modes > 1:
-            R_cost_accs  = [1e-4, 1e-2, 1]
-            R_cost_curvs = [1e-2,  1e0, 1e2]
+        # Step 2.  Fit R_cost based on 5 (max) modes log-likelihood.
+        R_cost_accs  = [1e-2, 1e-1, 1e0]
+        R_cost_curvs = [1e-1,  1e0, 1e1]
 
-            ll_fit_list = []
-            for R_acc in R_cost_accs:
-                for R_curv in R_cost_curvs:
-                    self.R_cost = np.diag([R_acc, R_curv])
-                    predict_dict = self.predict(train_set)
-                    metrics_df = compute_trajectory_metrics(predict_dict, ks_eval=[5])
+        ll_fit_list = []
+        for R_acc in R_cost_accs:
+            for R_curv in R_cost_curvs:
+                self.R_cost = np.diag([R_acc, R_curv])
+                predict_dict = self.predict(train_set)
+                metrics_df = compute_trajectory_metrics(predict_dict, ks_eval=[5])
 
-                    ll_result = np.mean(metrics_df.traj_LL_5)
-                    ll_fit_list.append( [ll_result, R_acc, R_curv] )
+                ll_result = np.mean(metrics_df.traj_LL_5)
+                ll_fit_list.append( [ll_result, R_acc, R_curv] )
+                print("R eval: ", ll_fit_list[-1])
 
-            ll_fit_list = np.array(ll_fit_list)
-            print("R", ll_fit_list)
-            best_fit_ind = np.argmax( ll_fit_list[:, 0] )
-            R_acc_best   = ll_fit_list[best_fit_ind, 1]
-            R_curv_best  = ll_fit_list[best_fit_ind, 2]
-            self.R_cost = np.diag( [R_acc_best, R_curv_best] )
+        ll_fit_list = np.array(ll_fit_list)
+        best_fit_ind = np.argmax( ll_fit_list[:, 0] )
+        R_acc_best   = ll_fit_list[best_fit_ind, 1]
+        R_curv_best  = ll_fit_list[best_fit_ind, 2]
+        self.R_cost = np.diag( [R_acc_best, R_curv_best] )
 
         print(f"BEST R_cost: {self.R_cost}")
 
