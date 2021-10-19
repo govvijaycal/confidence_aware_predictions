@@ -44,18 +44,8 @@ class AgentHistory:
 		walker_actors        = actor_list.filter('walker*')
 		traffic_light_actors = actor_list.filter('*traffic_light*')
 
-		# Identify the ego vehicle.
-		ego_vehicles    = [actor for actor in vehicle_actors if actor.attributes['role_name'] == 'hero']
-		if len(ego_vehicles) == 0:
-			raise RuntimeError("No ego vehicle detected!  Specify a vehicle with role_name hero.")
-		elif len(ego_vehicles) > 1:
-			raise RuntimeError("Multiple ego vehicles detected! Specify just one vehicle with role_name hero.")
-		else:
-			pass
-		self.ego_vehicle = ActorInfo(ego_vehicles[0], history_max_length)
-
-		# Identify other vehicles in the scene.
-		self.npc_vehicles = {actor.id : ActorInfo(actor, history_max_length) for actor in vehicle_actors if actor.attributes['role_name'] != 'hero'}
+		# Identify all vehicles in the scene.
+		self.vehicles = {actor.id : ActorInfo(actor, history_max_length) for actor in vehicle_actors}
 
 		# Identify pedestrians in the scene.
 		self.pedestrians    = {actor.id : ActorInfo(actor, history_max_length) for actor in walker_actors}
@@ -86,10 +76,8 @@ class AgentHistory:
 		"""
 		time = world_snapshot.timestamp.elapsed_seconds
 
-		self.ego_vehicle.update(time, world_snapshot.find(self.ego_vehicle.id).get_transform() )
-
-		for veh_id in self.npc_vehicles.keys():
-			self.npc_vehicles[veh_id].update( time, world_snapshot.find(veh_id).get_transform() )
+		for veh_id in self.vehicles.keys():
+			self.vehicles[veh_id].update( time, world_snapshot.find(veh_id).get_transform() )
 
 		for ped_id in self.pedestrians.keys():
 			self.pedestrians[ped_id].update( time, world_snapshot.find(ped_id).get_transform() )
@@ -107,7 +95,8 @@ class AgentHistory:
 		"""
 
 		snapshots = {}
-		tms = np.array(self.ego_vehicle.time_history)
+		arbitrary_veh_key = list(self.vehicles.keys())[0]
+		tms = np.array(self.vehicles[arbitrary_veh_key].time_history)
 		current_tm = tms[-1]
 
 		if np.min(history_secs) < 0.:
@@ -119,8 +108,7 @@ class AgentHistory:
 			scene_dict = {}
 
 			if np.abs(tms[ind_closest] - tm_query) <= closeness_eps:
-				scene_dict['ego_vehicle']  = [self.ego_vehicle.get_snapshot(ind_closest)]
-				scene_dict['npc_vehicles'] = [veh.get_snapshot(ind_closest) for veh in self.npc_vehicles.values()]
+				scene_dict['vehicles'] = [veh.get_snapshot(ind_closest) for veh in self.vehicles.values()]
 				scene_dict['pedestrians']  = [ped.get_snapshot(ind_closest) for ped in self.pedestrians.values()]
 
 			snapshots[np.round(hsec, 2)] = scene_dict

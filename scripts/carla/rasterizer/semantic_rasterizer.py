@@ -65,8 +65,8 @@ class SemanticRasterizer:
                  carla_topology,
                  raster_size=(500, 500), # pixel height and width
                  raster_resolution=0.1,  # meters / pixel resolution
-                 ego_center_x = 100,     # pixels along x-axis where ego center should be located
-                 ego_center_y = 250,     # pixels along y-axis where ego center should be located
+                 target_center_x = 100,     # pixels along x-axis where target center should be located
+                 target_center_y = 250,     # pixels along y-axis where target center should be located
                  ):
 
         # Road Information.
@@ -76,9 +76,9 @@ class SemanticRasterizer:
 
         # Raster Related Information.
         self.raster_height, self.raster_width = raster_size
-        self.ego_to_pixel = np.array([[1./raster_resolution,  0., ego_center_x],\
-                                      [0, -1./raster_resolution, ego_center_y],\
-                                      [0., 0., 1.]])
+        self.target_to_pixel = np.array([[1./raster_resolution,  0., target_center_x],\
+                                         [0, -1./raster_resolution, target_center_y],\
+                                         [0., 0., 1.]])
 
         # Raster Color Selection.
         # NOTE: crosswalks omitted since the Carla API doesn't
@@ -115,22 +115,21 @@ class SemanticRasterizer:
 
         return np.array([render_xmin, render_ymin, render_xmax, render_ymax])
 
-    def rasterize(self, agent_history):
+    def rasterize(self, agent_history, target_agent_id, render_traffic_lights=True):
         img = np.zeros((self.raster_height, self.raster_width, 3), dtype=np.uint8)
 
-        # TODO: this should be modified to focus on a given agent in the history, not just ego.
-        ego_pose_current = agent_history.ego_vehicle.pose_history[-1]
-        ego_centroid     = np.array(ego_pose_current[:2])
-        ego_yaw          = ego_pose_current[2]
+        target_pose_current = agent_history.vehicles[target_agent_id].pose_history[-1]
+        target_centroid = np.array(target_pose_current[:2])
+        target_yaw      = target_pose_current[2]
 
-        R_ego_to_world    = np.array([[np.cos(ego_yaw), -np.sin(ego_yaw)],\
-                                     [np.sin(ego_yaw),  np.cos(ego_yaw)]])
-        t_ego_to_world    = ego_centroid.reshape(2, 1)
+        R_target_to_world = np.array([[np.cos(target_yaw), -np.sin(target_yaw)],\
+                                      [np.sin(target_yaw),  np.cos(target_yaw)]])
+        t_target_to_world = target_centroid.reshape(2, 1)
 
-        R_world_to_ego = R_ego_to_world.T
-        t_world_to_ego = -R_ego_to_world.T @ t_ego_to_world
+        R_world_to_target = R_target_to_world.T
+        t_world_to_target = -R_target_to_world.T @ t_target_to_world
 
-        world_to_pixel = self.ego_to_pixel @ np.block([[R_world_to_ego, t_world_to_ego], [0., 0., 1.]])
+        world_to_pixel = self.target_to_pixel @ np.block([[R_world_to_target, t_world_to_target], [0., 0., 1.]])
 
         pixel_to_world = np.linalg.inv(world_to_pixel)
 
@@ -148,11 +147,12 @@ class SemanticRasterizer:
 
         # Plot crosswalks -> not annotated cleanly (unlike sidewalks) so skipped for now.
 
-        # Plot traffic lights.
-        for (tl_id, tl_info) in agent_history.traffic_lights.items():
-            tl_xy = convert_world_coords_to_pixels(np.array(tl_info[:2]).reshape(1,2), world_to_pixel)
-            tl_xy = np.round(tl_xy, 0).astype(np.int).flatten()
-            cv2.circle(img, tuple(tl_xy), self.tl_radius, self.tl_colors[tl_info[2]], -1) # TL visualized.
+        if render_traffic_lights:
+            # Plot traffic lights.
+            for (tl_id, tl_info) in agent_history.traffic_lights.items():
+                tl_xy = convert_world_coords_to_pixels(np.array(tl_info[:2]).reshape(1,2), world_to_pixel)
+                tl_xy = np.round(tl_xy, 0).astype(np.int).flatten()
+                cv2.circle(img, tuple(tl_xy), self.tl_radius, self.tl_colors[tl_info[2]], -1) # TL visualized.
 
         # Plot lane centerlines.
         for index in indices_in_bounds:
