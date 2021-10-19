@@ -1,0 +1,79 @@
+{
+	"carla_params" : {
+		"map_str"              : "Town05",
+		"weather_str"          : "ClearNoon",
+		"fps"                  : 20,
+		"intersection_csv_loc" : "intersection_01.csv"
+	},
+	"drone_viz_params" : {
+		"x"                  : 30.0,
+		"y"                  :  0.0,
+		"visualize_opencv"   : true,
+		"save_avi"           : true,
+		"overlay_gmm"        : true,
+		"overlay_ego_info"   : true,
+		"overlay_mode_probs" : true,
+		"overlay_traj_hist"  : true
+	},
+	"ego_init_jsons" : [
+		"ego_init_01.json",
+		"ego_init_02.json",
+		"ego_init_03.json",
+		"ego_init_04.json"
+	],
+	"vehicle_params" : [
+		{
+			"role"                        : "static",
+			"vehicle_type"                : "vehicle.audi.tt",
+			"vehicle_color"               : "246, 246, 246",
+			"policy_type"                 : "static",
+			"intersection_start_node_idx" : 1,
+			"intersection_goal_node_idx"  : 1,
+			"start_left_offset"           : 0.0,
+			"goal_left_offset"            : 0.0,
+			"start_longitudinal_offset"   : 0.0,
+			"goal_longitudinal_offset"    : 0.0,
+			"nominal_speed"               : 0.0,
+			"init_speed"                  : 0.0
+		},
+		{
+			"role"                        : "static",
+			"vehicle_type"                : "vehicle.audi.tt",
+			"vehicle_color"               : "246, 246, 246",
+			"policy_type"                 : "static",
+			"intersection_start_node_idx" : 3,
+			"intersection_goal_node_idx"  : 3,
+			"start_left_offset"           : 0.0,
+			"goal_left_offset"            : 0.0,
+			"start_longitudinal_offset"   : 0.0,
+			"goal_longitudinal_offset"    : 0.0,
+			"nominal_speed"               : 0.0,
+			"init_speed"                  : 0.0
+		},
+		{
+			"role"                        : "target",
+			"vehicle_type"                : "vehicle.mercedes-benz.coupe",
+			"vehicle_color"               : "186, 0, 0",
+			"policy_type"                 : "mpc",
+			"intersection_start_node_idx" :     2,
+			"intersection_goal_node_idx"  :     1,
+			"start_left_offset"           :   3.7,
+			"goal_left_offset"            :   3.7,
+			"start_longitudinal_offset"   : -10.0,
+			"goal_longitudinal_offset"    :  20.0,
+			"nominal_speed"               :  12.0,
+			"init_speed"                  :  12.0
+		},
+		{
+			"role"                        : "ego",
+			"vehicle_type"                : "vehicle.mercedes-benz.coupe",
+			"vehicle_color"               : "0, 128, 0",
+			"intersection_start_node_idx" :    0,
+			"intersection_goal_node_idx"  :    3,
+			"start_left_offset"           :    3.7,
+			"goal_left_offset"            :    3.7,
+			"goal_longitudinal_offset"    : 20.0,
+			"nominal_speed"               : 10.0
+		}
+	]
+}

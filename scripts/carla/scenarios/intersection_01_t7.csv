@@ -1,0 +1,8 @@
+# This refers to a 3-way intersection in Town07.
+# Each line contains a start pose and goal pose in the same orientation.
+# start_x (m), start_y (m), start_yaw (deg), goal_x (m), goal_y (m), goal_yaw (deg)
+# nan indicates the start/goal pose is not defined for that orientation.
+-39.0, -158.0,   0,   nan,    nan,   0
+ -3.8, -197.0,  90,  -4.5, -123.0,  90
+  nan,    nan, 180, -39.0, -161.5, 180
+ -1.0, -123.0, 270,  -0.3, -197.0, 270

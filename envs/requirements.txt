@@ -32,7 +32,7 @@ recommonmark
 pre-commit
 importlib-metadata
 zarr
-opencv-contrib-python-headless
+opencv-contrib-python
 pymap3d
 scipy
 tqdm

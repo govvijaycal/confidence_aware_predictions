@@ -1,0 +1,48 @@
+{
+	"carla_params" : {
+		"map_str"              : "Town07",
+		"weather_str"          : "CloudyNoon",
+		"fps"                  : 20,
+		"intersection_csv_loc" : "intersection_01_t7.csv"
+	},
+	"drone_viz_params" : {
+		"x"                  : -20.0,
+		"y"                  : -160.0,
+		"visualize_opencv"   : true,
+		"save_avi"           : false,
+		"overlay_gmm"        : false,
+		"overlay_ego_info"   : false,
+		"overlay_mode_probs" : false,
+		"overlay_traj_hist"  : true
+	},
+	"ego_init_jsons" : [
+		"ego_init_00.json"
+	],
+	"vehicle_params" : [
+		{
+			"role"                        : "target",
+			"vehicle_type"                : "vehicle.mercedes-benz.coupe",
+			"vehicle_color"               : "186, 0, 0",
+			"policy_type"                 : "lk_pi",
+			"intersection_start_node_idx" :     3,
+			"intersection_goal_node_idx"  :     3,
+			"start_left_offset"           :   0.0,
+			"goal_left_offset"            :   0.0,
+			"start_longitudinal_offset"   :   0.0,
+			"goal_longitudinal_offset"    :   0.0,
+			"nominal_speed"               :  10.0,
+			"init_speed"                  :  12.0
+		},
+		{
+			"role"                        : "ego",
+			"vehicle_type"                : "vehicle.mercedes-benz.coupe",
+			"vehicle_color"               : "0, 128, 0",
+			"intersection_start_node_idx" :    1,
+			"intersection_goal_node_idx"  :    1,
+			"start_left_offset"           :  0.0,
+			"goal_left_offset"            :  0.0,
+			"goal_longitudinal_offset"    :  0.0,
+			"nominal_speed"               : 10.0
+		}
+	]
+}

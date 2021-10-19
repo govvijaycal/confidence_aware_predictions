@@ -25,7 +25,8 @@ class GMMPrediction:
 		self.sigmas = sigmas
 
 	def get_top_k_mode_labels(self, k=1):
-		return np.argsort(self.mode_probabilities)[-k:]
+		# Note: this returns the most probable mode first.
+		return np.argsort(-self.mode_probabilities)[:k]
 
 	def get_top_k_GMM(self, k):
 		assert k > 0 and k < self.n_modes
@@ -53,6 +54,17 @@ class GMMPrediction:
 			ades.append(np.mean(displacements))
 
 		return ades
+
+	def transform(self, R, t):
+		# Applies a transformation specified by rotation R
+		# and translation t to the GMM trajectories.
+		for mode_id in range(self.n_modes):
+			for tm_step in range(self.n_timesteps):
+				new_mu = R @ self.mus[mode_id, tm_step] + t
+				self.mus[mode_id, tm_step] = new_mu
+
+				new_sigma = R @ self.sigmas[mode_id, tm_step] @ R.T
+				self.sigmas[mode_id, tm_step] = new_sigma
 
 	##################################################################
 	#################### LIKELIHOOD METRIC ###########################
