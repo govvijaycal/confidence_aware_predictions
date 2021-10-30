@@ -145,6 +145,12 @@ class ContextProviderBase:
             if indegree == 0: # lane traversal start
                 lane_dfs_helper(lane_id, f"{lane_id}")
 
+        # NOTE: for now, we ignore cyclic lane traversals.
+        # In other words, we only consider lane traversals such that the starting lane token
+        # does not have a predecessor, which is usually the case with typical intersections.
+        # My guess is that cyclical cases are usually at places like u-turns / roundabouts,
+        # which are relatively rare (and only seem to pop up in the L5 dataset).
+        """
         # This sanity check is to handle cases where entire section of the graph
         # are ignored due to cyclic issue above.
         for lane_token in lane_adjacency.keys():
@@ -156,6 +162,7 @@ class ContextProviderBase:
             if not token_found:
                 print(f"Did not explore lane token {lane_token} using DFS!  Check it out.")
                 import pdb; pdb.set_trace()
+        """
 
         return lane_traversals
 
