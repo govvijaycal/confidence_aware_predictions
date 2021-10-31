@@ -2,9 +2,18 @@ import numpy as np
 
 class LaneEKF():
     def __init__(self, Q_u, R_lane_frame):
-        # Kinematic state distribution
-        # We deal with a 4-state: [x, y, theta, v] and
-        # 2-input: [u_acc, u_curv] model.
+        """
+        EKF that is based upon tracking a lane.
+
+        Reference paper with original implementation:
+          Petrich et al, "Map-based long term motion prediction for vehicles in traffic environments", ITSC 2013.
+          https://doi.org/10.1109/ITSC.2013.6728549
+
+        The system has the following states, inputs, and measurements:
+          States: [x, y, theta, v], kinematic state
+          Inputs: [u_acc, u_curv], acceleration + curvature
+          Measurements: [x_{ALP}, y_{ALP}, theta_{ALP}] where ALP is the active lane point.
+        """
 
         self.nx = 4 # state dimension
         self.nu = 2 # input dimension
@@ -13,10 +22,12 @@ class LaneEKF():
         self.z = np.zeros(self.nx) # mean
         self.P = np.eye(self.nx)   # covariance
 
-        # Input covariance
+        # Input covariance, i.e.
+        # Q_u = diag(sigma^2_{acc}, sigma^2_{curv}).
         self.update_Q_u(Q_u)
 
-        # Measurement covariance (lane waypoint ID)
+        # Measurement covariance in the lane-aligned frame, i.e.
+        # R_lane_frame = diag(sigma^2_s, sigma^2_{ey}, sigma^2_{epsi}).
         assert R_lane_frame.shape == (self.nm, self.nm)
         assert np.allclose(R_lane_frame, R_lane_frame.T)
         assert np.linalg.det(R_lane_frame) > 0.

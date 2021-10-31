@@ -6,6 +6,7 @@ import pickle
 import tensorflow as tf
 from dataclasses import dataclass
 from typing import List
+from scipy.stats import loguniform
 import heapq
 
 scriptdir = os.path.abspath(__file__).split('scripts')[0] + 'scripts/'
@@ -50,6 +51,7 @@ class LaneFollower():
                  dataset_name,
                  Q_ctrl = np.eye(2),
                  R_cost = np.eye(2),
+                 temperatures = [1., 1.],
                  n_max_modes = 16,
                  ekf_cvtr_weights_path=None,
                  **kwargs):
@@ -61,8 +63,16 @@ class LaneFollower():
             raise ValueError(f"{dataset_name} is not a valid dataset selection.")
         self.dataset_name = dataset_name
 
+        assert type(n_max_modes) == int
+        assert n_max_modes >= 1
         self.n_max_modes = n_max_modes
+
+        assert R_cost.shape == (2,2)
         self.R_cost = R_cost
+
+        assert len(temperatures) == 2
+        self.temperatures = temperatures
+
         self._init_fixed_params()
 
         self.ekf_cvtr = EKFKinematicCVTR()
@@ -102,15 +112,16 @@ class LaneFollower():
 
         # Curvature FF/FB Control Params, selected based on Nitin Kapania's code here:
         # https://github.com/nkapania/Wolverine/blob/9a9efbdc98c7820268039544082002874ac67007/utils/control.py#L16
-        # This was originally applied with a full dynamic bicycle model, so arguable if params work without tuning.
-        # Leaving this alone for now for simplicity.
-        self.k_curv_fb  = 0.0538 # proportional gain, rad/m
-        self.x_la       = 14.2   # lookahead distance, m
+        # This was originally applied for the steering angle of a vehicle, and we assume that an average vehicle
+        # has a wheelbase of 3 meters, in order to get the equivalent curvature input.
+        self.k_curv_fb  = 0.0538 / 3.   # proportional gain on e_y for curvature, rad/m^2
+        self.x_la       = 14.2          # lookahead distance for e_psi, m
 
     def save_weights(self, path):
         model_dict = {}
         model_dict["n_max_modes"]   = self.n_max_modes
         model_dict["ekf_cvtr_path"] = self.ekf_cvtr_path
+        model_dict["temperatures"]  = self.temperatures
         model_dict["Q_ctrl"]        = self.lane_ekf.Q_u
         model_dict["R_cost"]        = self.R_cost
 
@@ -124,10 +135,17 @@ class LaneFollower():
 
         self.ekf_cvtr_path = model_dict["ekf_cvtr_path"]
         self.ekf_cvtr.load_weights(self.ekf_cvtr_path)
+        print(f"Using trained covariance params for EKF CVTR from {self.ekf_cvtr_path}")
+
+        self.temperatures  = model_dict["temperatures"]
+        assert len(self.temperatures) == 2
 
         self.lane_ekf.update_Q_u(model_dict["Q_ctrl"])
+        print(f"Using Lane EKF Q of: {self.lane_ekf.Q_u}")
 
         self.R_cost = model_dict["R_cost"]
+        assert self.R_cost.shape == (2,2)
+        print(f"Using Cost R of: {self.R_cost}")
 
     def _preprocess_entry(self, entry, split_name, mode="predict", debug=False):
         """ Given a dataset entry from a tfrecord, returns the motion history and associated scene context.
@@ -385,7 +403,7 @@ class LaneFollower():
                      pose_residual_local
 
             # Prior probability based on Mahalanobis distance squared (closer to zero = high prior prob).
-            lane_assoc_priors.append( np.exp(-d_M_sq) )
+            lane_assoc_priors.append( np.exp(-d_M_sq / self.temperatures[0]) )
 
         # Return normalized lane probabilities.
         lane_assoc_priors = np.array(lane_assoc_priors)
@@ -445,6 +463,37 @@ class LaneFollower():
 
         return lane_motion_hypotheses
 
+    def prune_redundant_hypotheses(self, prior_lane_probs, lmhs):
+        final_prior_lane_probs = []
+        final_lmhs             = []
+        final_input_sequences  = []
+
+        def get_inputs(lmh):
+            return np.column_stack((lmh.u_accs, lmh.u_curvs))
+
+        for (cand_prob, cand_lmh) in zip(prior_lane_probs, lmhs):
+            cand_input_seq = get_inputs(cand_lmh)
+            include_cand = True
+
+            for input_seq in final_input_sequences:
+                if np.linalg.norm( cand_input_seq - input_seq ) < 0.5:
+                    include_cand = False
+                    break
+
+            if include_cand:
+                final_prior_lane_probs.append(cand_prob)
+                final_lmhs.append(cand_lmh)
+                final_input_sequences.append(cand_input_seq)
+
+        final_prior_lane_probs = np.array(final_prior_lane_probs)
+        assert np.sum(final_prior_lane_probs) > 0.
+        final_prior_lane_probs = final_prior_lane_probs / np.sum(final_prior_lane_probs)
+
+        assert np.allclose( np.sum(final_prior_lane_probs), 1. )
+        assert len(final_prior_lane_probs) == len(final_lmhs)
+
+        return final_prior_lane_probs, final_lmhs
+
     def get_posterior_lane_association(self, prior_lane_probs, lane_motion_hypotheses):
         # Evaluate the tracking costs.
         cost_likelihoods = []
@@ -455,7 +504,7 @@ class LaneFollower():
             else:
                 u_comb  = np.column_stack((lmh.u_accs, lmh.u_curvs))
                 costs   = np.sum([u.T @ self.R_cost @ u for u in u_comb])
-                cost_likelihoods.append( np.exp(-np.sum(costs)) )
+                cost_likelihoods.append( np.exp(-np.sum(costs) / self.temperatures[1]) )
 
         # Compute posterior lane probabilities.
         cost_likelihoods = np.array(cost_likelihoods)
@@ -488,7 +537,7 @@ class LaneFollower():
                 gap_curr  = s_lead - s_curr
                 gap_ratio = gap_des / max(0.1, gap_curr)
 
-                a_idm = self.a_max * (1 - (vel_ratio)**4 - gap_ratio**2)
+                a_idm = self.a_max * (1 - vel_ratio**4 - gap_ratio**2)
 
             a_idm = np.clip(a_idm, -self.b_decel, self.a_max) # Limit with a threshold on max deceleration + acceleration.
 
@@ -540,9 +589,12 @@ class LaneFollower():
             if s < lane_localizer.lane_length:
                 # If we are still within the defined lane region, use an input model based on IDM + FF/FB policies.
 
-                # Use lateral acceleration constraints to limit v_lane on turns.
-                if np.abs(curv_lane) >= 0.01:
-                    v_lane = min( v_lane, np.sqrt(self.lat_accel_max / np.abs(curv_lane)) )
+                # Compute the curvature input, which simply considers relative pose to lane and not speed.
+                u_curv = self._get_curv_ff_fb(curv_lane, ey, epsi)
+
+                # Use lateral acceleration constraints to limit v_lane on turns given curvature input.
+                if np.abs(u_curv) >= 0.01:
+                    v_lane = min( v_lane, np.sqrt(self.lat_accel_max / np.abs(u_curv)) )
 
                 s_lead, v_lead = self._identify_lead_agent(step_ind,
                                                            s,
@@ -552,7 +604,7 @@ class LaneFollower():
                                                            other_agent_preds)
 
                 u_acc  = self._get_acceleration_idm(s, z_curr[3], v_lane, s_lead=s_lead, v_lead=v_lead)
-                u_curv = self._get_curv_ff_fb(curv_lane, ey, epsi)
+
 
             else:
                 # Else we are at the end of the defined lane, let's just assume zero inputs (CVH) due to lack of further context.
@@ -564,9 +616,12 @@ class LaneFollower():
             u = [u_acc, u_curv]
 
             z_curr, P_curr, _, _ = self.lane_ekf.time_update(u, dt)
-            if s < lane_localizer.lane_length:
-                # Use the lane pseudo-measurement if available.
-                z_curr, P_curr, _, _ = self.lane_ekf.measurement_update(lane_localizer)
+
+            # Opt to not use the lane "pseudo"-measurement, as we want to consider "open-loop" predictions
+            # for now to mimic other models.
+            # if s < lane_localizer.lane_length:
+            #     # Use the lane pseudo-measurement if available.
+            #     z_curr, P_curr, _, _ = self.lane_ekf.measurement_update(lane_localizer)
 
             zs.append(z_curr)
             Ps.append(P_curr)
@@ -597,9 +652,10 @@ class LaneFollower():
 
             if len(entry_proc["scene_context"].lanes) > 0:
                 # Make lane context-aware predictions using a Bayesian framework.
-                prior_lane_probs     = self.get_prior_lane_association(entry_proc)
-                lmhs                 = self.get_lane_motion_hypotheses(entry_proc, prior_lane_probs)
-                posterior_lane_probs = self.get_posterior_lane_association(prior_lane_probs, lmhs)
+                prior_lane_probs       = self.get_prior_lane_association(entry_proc)
+                lmhs                   = self.get_lane_motion_hypotheses(entry_proc, prior_lane_probs)
+                prior_lane_probs, lmhs = self.prune_redundant_hypotheses(prior_lane_probs, lmhs)
+                posterior_lane_probs   = self.get_posterior_lane_association(prior_lane_probs, lmhs)
 
                 # Truncate based on number of modes we are allowed to consider.
                 final_probs, final_lmhs  = self.truncate_num_modes(posterior_lane_probs, lmhs)
@@ -657,7 +713,7 @@ class LaneFollower():
         print(f"There were {num_instances_without_context} for which no lane info was available.")
         return predict_dict
 
-    def predict_instance(self, image_raw, past_states, future_tms=np.arange(0.2, 5.1,0.2)):
+    def predict_instance(self, scene_context, past_states, future_tms=np.arange(0.2, 5.1,0.2)):
         raise NotImplementedError
 
     """
@@ -671,56 +727,86 @@ class LaneFollower():
         # Deterministically pick out a subset of the training set to fit on.
         np.random.seed(0)
         np.random.shuffle(train_set)
-        train_set = train_set[:20]
+        train_set = train_set[:10]
 
-        # Step 1.  Fit Q_u based on the log-likelihood of the most likely mode (with R_cost fixed).
-        sigma_acc_sq_cands  = [1e-2, 1e-1, 1e0]
-        sigma_curv_sq_cands = [1e-4, 1e-3, 1e-2]
+        # RANDOM SEARCH IMPLEMENTATION
+        temp1_rv         = loguniform(1e0,  1e1)   # temperature for lane association prior
+        temp2_rv         = loguniform(1e0,  1e2)   # temperature for lane cost posterior
+        sigma_acc_sq_rv  = loguniform(1e0,  1e1)   # std deviation for acceleration input
+        sigma_curv_sq_rv = loguniform(1e-4, 1e-2)  # std deviation for curvature input
+        cost_acc_rv      = loguniform(1e-2, 1e0)   # cost weight bound for acceleration input
+        cost_curv_rv     = loguniform(1e0,  1e2)   # cost weight bound for curvature input
+
+        params_eval_arr     = []
+        n_sampled_params    = 240 # number of random samples for first pass
+        n_final_eval_params = 6  # number of best candidate samples for final pass
+        n_subset_records    = 1  # number of tfrecord entries to consider in first pass
+
+        # Try out the random samples on a smaller subset to get some good candidates.
         ll_fit_list = []
+        for _ in range(n_sampled_params):
+            temp1_cand         = temp1_rv.rvs(size=1).item()
+            temp2_cand         = temp2_rv.rvs(size=1).item()
+            self.temperatures = [temp1_cand, temp2_cand]
 
-        for sigma_acc_sq in sigma_acc_sq_cands:
-            for sigma_curv_sq in sigma_curv_sq_cands:
-                Q_eval = np.diag([sigma_acc_sq, sigma_curv_sq])
-                self.lane_ekf.update_Q_u(Q_eval)
-                predict_dict = self.predict(train_set)
-                metrics_df = compute_trajectory_metrics(predict_dict, ks_eval=[1])
+            sigma_acc_sq_cand  = sigma_acc_sq_rv.rvs(size=1).item()
+            sigma_curv_sq_cand = sigma_curv_sq_rv.rvs(size=1).item()
+            Q_eval = np.diag([sigma_acc_sq_cand, sigma_curv_sq_cand])
+            self.lane_ekf.update_Q_u(Q_eval)
 
-                ll_result = np.mean(metrics_df.traj_LL_1)
-                ll_fit_list.append( [ll_result, sigma_acc_sq, sigma_curv_sq] )
-                print("Q eval: ", ll_fit_list[-1])
+            cost_acc_cand      = cost_acc_rv.rvs(size=1).item()
+            cost_curv_cand     = cost_curv_rv.rvs(size=1).item()
+            self.R_cost = np.diag([cost_acc_cand, cost_curv_cand])
 
-        ll_fit_list = np.array(ll_fit_list)
-        best_fit_ind       = np.argmax( ll_fit_list[:, 0] )
-        best_sigma_acc_sq  = ll_fit_list[best_fit_ind, 1]
-        best_sigma_curv_sq = ll_fit_list[best_fit_ind, 2]
-        self.lane_ekf.update_Q_u( np.diag([best_sigma_acc_sq,
-                                           best_sigma_curv_sq]) )
+            predict_dict = self.predict(train_set[:n_subset_records])
+            metrics_df = compute_trajectory_metrics(predict_dict, ks_eval=[5])
 
+            ll_result = np.mean(metrics_df.traj_LL_5)
+            ll_fit_list.append( [ll_result, temp1_cand, temp2_cand, \
+                                 sigma_acc_sq_cand, sigma_curv_sq_cand, \
+                                 cost_acc_cand, cost_curv_cand] )
+            print("Evaluated: ", ll_fit_list[-1])
+
+        # Identify the best performing samples for further consideration.
+        ll_fit_list    = np.array(ll_fit_list)
+        best_cand_inds = np.argsort(ll_fit_list[:, 0])[-n_final_eval_params:]
+
+        # Evaluate the best performing samples on a fuller dataset, for more detailed consideration.
+        ll_fit_final_list = []
+        for cand_ind in best_cand_inds:
+            cand_list = ll_fit_list[cand_ind]
+            temp1_cand, temp2_cand, sigma_acc_sq_cand, sigma_curv_sq_cand, cost_acc_cand, cost_curv_cand = cand_list[1:]
+
+            self.temperatures = [temp1_cand, temp2_cand]
+
+            Q_eval = np.diag([sigma_acc_sq_cand, sigma_curv_sq_cand])
+            self.lane_ekf.update_Q_u(Q_eval)
+
+            self.R_cost = np.diag([cost_acc_cand, cost_curv_cand])
+
+            predict_dict = self.predict(train_set)
+            metrics_df = compute_trajectory_metrics(predict_dict, ks_eval=[5])
+
+            ll_result = np.mean(metrics_df.traj_LL_5)
+            ll_fit_final_list.append( [ll_result, temp1_cand, temp2_cand, sigma_acc_sq_cand, sigma_curv_sq_cand, cost_acc_cand, cost_curv_cand] )
+            print("Evaluated Final: ", ll_fit_final_list[-1])
+
+        # Select the best candidate set and update values.
+        ll_fit_final_list = np.array(ll_fit_final_list)
+        best_fit_ind      = np.argmax(ll_fit_final_list[:,0])
+        _, bf_tmp1, bf_tmp2, bf_sigma_acc_sq, bf_sigma_curv_sq, bf_cost_acc, bf_cost_curv = ll_fit_final_list[best_fit_ind]
+
+        self.temperatures = [bf_tmp1, bf_tmp2]
+        print(f"BEST temperatures: {self.temperatures}")
+
+        self.lane_ekf.update_Q_u( np.diag([bf_sigma_acc_sq,
+                                           bf_sigma_curv_sq]) )
         print(f"BEST Q_u: {self.lane_ekf.Q_u}")
 
-        # Step 2.  Fit R_cost based on 5 (max) modes log-likelihood.
-        R_cost_accs  = [1e-2, 1e-1, 1e0]
-        R_cost_curvs = [1e-1,  1e0, 1e1]
-
-        ll_fit_list = []
-        for R_acc in R_cost_accs:
-            for R_curv in R_cost_curvs:
-                self.R_cost = np.diag([R_acc, R_curv])
-                predict_dict = self.predict(train_set)
-                metrics_df = compute_trajectory_metrics(predict_dict, ks_eval=[5])
-
-                ll_result = np.mean(metrics_df.traj_LL_5)
-                ll_fit_list.append( [ll_result, R_acc, R_curv] )
-                print("R eval: ", ll_fit_list[-1])
-
-        ll_fit_list = np.array(ll_fit_list)
-        best_fit_ind = np.argmax( ll_fit_list[:, 0] )
-        R_acc_best   = ll_fit_list[best_fit_ind, 1]
-        R_curv_best  = ll_fit_list[best_fit_ind, 2]
-        self.R_cost = np.diag( [R_acc_best, R_curv_best] )
-
+        self.R_cost = np.diag( [bf_cost_acc, bf_cost_curv] )
         print(f"BEST R_cost: {self.R_cost}")
 
+        # Save the fitted model parameters.
         if logdir is not None:
             os.makedirs(logdir, exist_ok=True)
             filename = logdir + 'params.pkl'

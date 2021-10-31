@@ -4,8 +4,8 @@ from scipy.signal import filtfilt
 class LaneLocalizer():
     def __init__(self, lane_xs, lane_ys, lane_yaws, lane_vs, s_resolution=0.5):
         # Make sure yaw angles are within bounds:
-        lane_ss    = self._get_cumulative_distances(lane_xs, lane_ys)
-        lane_yaws = self._bound_angle_within_pi(lane_yaws)
+        lane_ss     = self._get_cumulative_distances(lane_xs, lane_ys)
+        lane_yaws   = self._bound_angle_within_pi(lane_yaws)
 
         s_interp    = np.arange(0., lane_ss[-1] + s_resolution/2., s_resolution)
         x_interp    = np.interp(s_interp, lane_ss, lane_xs)
