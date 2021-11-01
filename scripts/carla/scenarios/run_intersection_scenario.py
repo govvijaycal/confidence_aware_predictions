@@ -22,6 +22,7 @@ scriptdir = os.path.abspath(__file__).split('carla')[0] + 'carla/'
 sys.path.append(scriptdir)
 from policies.static_agent import StaticAgent
 from policies.lanekeeping_pi_agent import LanekeepingPIAgent
+from policies.lanekeeping_mpc_agent import LanekeepingMPCAgent
 
 from rasterizer.agent_history import AgentHistory
 from rasterizer.sem_box_rasterizer import SemBoxRasterizer
@@ -133,7 +134,13 @@ def get_vehicle_policy(vehicle_params, vehicle_actor, goal_transform, simulation
                                   nominal_speed_mps=vehicle_params.nominal_speed,
                                   lat_accel_max=2.0,
                                   is_rational = vehicle_params.policy_config["is_rational"])
-    # TODO: additional policies under development.
+    elif vehicle_params.policy_type == "lk_mpc":
+        return LanekeepingMPCAgent(vehicle_actor, goal_transform.location, \
+                                   N=vehicle_params.N_mpc,
+                                   DT=vehicle_params.dt_mpc,
+                                   dt=simulation_dt,
+                                   nominal_speed_mps=vehicle_params.nominal_speed,
+                                   lat_accel_max=2.0)
     else:
         raise ValueError(f"Unsupported policy type: {vehicle_params.policy_type}")
 
