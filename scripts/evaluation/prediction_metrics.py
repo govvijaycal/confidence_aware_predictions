@@ -102,23 +102,30 @@ def traj_metric_fn(key, shared_predict_dict, ks_eval):
 
     return metric_dict
 
-def compute_trajectory_metrics(predict_dict, ks_eval=[1,3,5]):
+def compute_trajectory_metrics(predict_dict, ks_eval=[1,3,5], n_pool = None):
     # Given a collection of GMM predictions, computes trajectory metrics per dataset instance
     # returning a Pandas Dataframe for further analysis.
     N_instances = len(predict_dict.keys())
 
     data_list = []
-    with Manager() as mgr:
-        shared_predict_dict = mgr.dict(predict_dict)
-        with Pool(processes=8) as pool:
-            partial_fn = partial(traj_metric_fn,
-                                 shared_predict_dict=shared_predict_dict,
-                                 ks_eval=ks_eval)
 
-            with tqdm(total = N_instances) as pbar:
-                for res in pool.imap_unordered(partial_fn, predict_dict.keys()):
-                    data_list.append(res)
-                    pbar.update()
+    if type(n_pool) is int and n_pool > 0:
+        # If memory is not an issue, we can parallelize and get significant speed up.
+        with Manager() as mgr:
+            shared_predict_dict = mgr.dict(predict_dict)
+            with Pool(processes=n_pool) as pool:
+                partial_fn = partial(traj_metric_fn,
+                                     shared_predict_dict=shared_predict_dict,
+                                     ks_eval=ks_eval)
+
+                with tqdm(total = N_instances) as pbar:
+                    for res in pool.imap_unordered(partial_fn, predict_dict.keys()):
+                        data_list.append(res)
+                        pbar.update()
+    else:
+        # Else use the trusty but slower serial processing (default).
+        for key in tqdm(predict_dict.keys()):
+            data_list.append(traj_metric_fn(key, predict_dict, ks_eval))
 
     metrics_df = pd.DataFrame(data_list)
     assert ~np.any(metrics_df.isnull())
@@ -174,34 +181,33 @@ def set_metric_fn(key, shared_predict_dict, ks_eval, betas_eval):
                 set_metric_dict[f"set_area_k{k}_b{beta}"], occ = \
                     trunc_gmm_k.compute_set_area(beta)
 
-                # import matplotlib.pyplot as plt
-                # area = set_metric_dict[f"set_area_k{k}_b{beta}"]
-                # plt.imshow(occ)
-                # plt.title(f"k{k}_b{beta}_a{area}")
-                # plt.show()
-
-    # if(set_metric_dict["num_modes"] > 1):
-    #     import pdb; pdb.set_trace()
     return set_metric_dict
 
-def compute_set_metrics(predict_dict, ks_eval=[1,3,5], betas_eval=[2,4,6,8,10]):
+def compute_set_metrics(predict_dict, ks_eval=[1,3,5], betas_eval=[2,4,6,8,10], n_pool = None):
     # Given a collection of GMM predictions, computes set metrics per dataset instance
     # returning a Pandas Dataframe for further analysis.
     N_instances = len(predict_dict.keys())
 
     data_list = []
-    with Manager() as mgr:
-        shared_predict_dict = mgr.dict(predict_dict)
-        with Pool(processes=8) as pool:
-            partial_fn = partial(set_metric_fn,
-                                 shared_predict_dict=shared_predict_dict,
-                                 ks_eval=ks_eval,
-                                 betas_eval=betas_eval)
 
-            with tqdm(total = N_instances) as pbar:
-                for res in pool.imap_unordered(partial_fn, predict_dict.keys()):
-                    data_list.append(res)
-                    pbar.update()
+    if type(n_pool) is int and n_pool > 0:
+        # If memory is not an issue, we can parallelize and get significant speed up.
+        with Manager() as mgr:
+            shared_predict_dict = mgr.dict(predict_dict)
+            with Pool(processes=2) as pool:
+                partial_fn = partial(set_metric_fn,
+                                     shared_predict_dict=shared_predict_dict,
+                                     ks_eval=ks_eval,
+                                     betas_eval=betas_eval)
+
+                with tqdm(total = N_instances) as pbar:
+                    for res in pool.imap_unordered(partial_fn, predict_dict.keys()):
+                        data_list.append(res)
+                        pbar.update()
+    else:
+        # Else use the trusty but slower serial processing (default).
+        for key in tqdm(predict_dict.keys()):
+            data_list.append(set_metric_fn(key, predict_dict, ks_eval, betas_eval))
 
     set_metric_df = pd.DataFrame(data_list)
     assert ~np.any(set_metric_df.isnull())
