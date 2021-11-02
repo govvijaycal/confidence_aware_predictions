@@ -50,6 +50,7 @@ class LaneFollower():
     def __init__(self,
                  dataset_name,
                  Q_ctrl = np.eye(2),
+                 Q_state = np.diag([1e-2, 1e-2, 1e-6, 1e-4]),
                  R_cost = np.eye(2),
                  temperatures = [1., 1.],
                  n_max_modes = 16,
@@ -88,6 +89,7 @@ class LaneFollower():
             print("Using default covariance params for EKF CVTR")
 
         self.lane_ekf = LaneEKF(Q_u = Q_ctrl,
+                                Q_z = Q_state,
                                 R_lane_frame = self.lane_projection_covar)
 
     def _init_fixed_params(self):
@@ -101,7 +103,7 @@ class LaneFollower():
         self.lane_projection_covar = np.diag([0.3, 1.5, 0.5]) # Taken from Eqn 33, https://doi.org/10.1109/ITSC.2013.6728549
         self.lane_width    = self.context_provider.lane_association_radius # width to be considered in the same lane
 
-        self.lat_accel_max = 4.0 # m/s^2, based on https://doi.org/10.3390/electronics8090943 (used to limit v_des)
+        self.lat_accel_max = 2.0 # m/s^2, based on https://doi.org/10.3390/electronics8090943 (used to limit v_des)
 
         # IDM params, picking from Table 11.2 of Traffic Flow Dynamics book.  These correspond to typical
         # parameters in urban traffic environments.
@@ -123,6 +125,7 @@ class LaneFollower():
         model_dict["ekf_cvtr_path"] = self.ekf_cvtr_path
         model_dict["temperatures"]  = self.temperatures
         model_dict["Q_ctrl"]        = self.lane_ekf.Q_u
+        model_dict["Q_state"]       = self.lane_ekf.Q_z
         model_dict["R_cost"]        = self.R_cost
 
         pickle.dump(model_dict, open(path, 'wb'))
@@ -141,7 +144,10 @@ class LaneFollower():
         assert len(self.temperatures) == 2
 
         self.lane_ekf.update_Q_u(model_dict["Q_ctrl"])
-        print(f"Using Lane EKF Q of: {self.lane_ekf.Q_u}")
+        print(f"Using Lane EKF Q_u of: {self.lane_ekf.Q_u}")
+
+        self.lane_ekf.update_Q_z(model_dict["Q_state"])
+        print(f"Using Lane EKF Q_z of: {self.lane_ekf.Q_z}")
 
         self.R_cost = model_dict["R_cost"]
         assert self.R_cost.shape == (2,2)
@@ -605,7 +611,6 @@ class LaneFollower():
 
                 u_acc  = self._get_acceleration_idm(s, z_curr[3], v_lane, s_lead=s_lead, v_lead=v_lead)
 
-
             else:
                 # Else we are at the end of the defined lane, let's just assume zero inputs (CVH) due to lack of further context.
                 u_acc  = 0.
@@ -732,15 +737,16 @@ class LaneFollower():
         # RANDOM SEARCH IMPLEMENTATION
         temp1_rv         = loguniform(1e0,  1e1)   # temperature for lane association prior
         temp2_rv         = loguniform(1e0,  1e2)   # temperature for lane cost posterior
-        sigma_acc_sq_rv  = loguniform(1e0,  1e1)   # std deviation for acceleration input
-        sigma_curv_sq_rv = loguniform(1e-4, 1e-2)  # std deviation for curvature input
+        sigma_acc_sq_rv  = loguniform(1e0,  1e2)   # std deviation for acceleration input
+        sigma_curv_sq_rv = loguniform(1e-3, 1e-1)  # std deviation for curvature input
+        sigma_pos_sq_rv  = loguniform(1e-2, 1e1)   # std deviation for XY state covariance
         cost_acc_rv      = loguniform(1e-2, 1e0)   # cost weight bound for acceleration input
         cost_curv_rv     = loguniform(1e0,  1e2)   # cost weight bound for curvature input
 
         params_eval_arr     = []
-        n_sampled_params    = 240 # number of random samples for first pass
-        n_final_eval_params = 6  # number of best candidate samples for final pass
-        n_subset_records    = 1  # number of tfrecord entries to consider in first pass
+        n_sampled_params    = 128 # number of random samples for first pass
+        n_final_eval_params = 8   # number of best candidate samples for final pass
+        n_subset_records    = 1   # number of tfrecord entries to consider in first pass
 
         # Try out the random samples on a smaller subset to get some good candidates.
         ll_fit_list = []
@@ -751,8 +757,13 @@ class LaneFollower():
 
             sigma_acc_sq_cand  = sigma_acc_sq_rv.rvs(size=1).item()
             sigma_curv_sq_cand = sigma_curv_sq_rv.rvs(size=1).item()
-            Q_eval = np.diag([sigma_acc_sq_cand, sigma_curv_sq_cand])
-            self.lane_ekf.update_Q_u(Q_eval)
+            Q_u_eval = np.diag([sigma_acc_sq_cand, sigma_curv_sq_cand])
+            self.lane_ekf.update_Q_u(Q_u_eval)
+
+            sigma_pos_sq_cand = sigma_pos_sq_rv.rvs(size=1).item()
+            Q_z_eval = np.copy(self.lane_ekf.Q_z)
+            Q_z_eval[:2,:2] = np.eye(2) * sigma_pos_sq_cand
+            self.lane_ekf.update_Q_z(Q_z_eval)
 
             cost_acc_cand      = cost_acc_rv.rvs(size=1).item()
             cost_curv_cand     = cost_curv_rv.rvs(size=1).item()
@@ -763,7 +774,7 @@ class LaneFollower():
 
             ll_result = np.mean(metrics_df.traj_LL_5)
             ll_fit_list.append( [ll_result, temp1_cand, temp2_cand, \
-                                 sigma_acc_sq_cand, sigma_curv_sq_cand, \
+                                 sigma_acc_sq_cand, sigma_curv_sq_cand, sigma_pos_sq_cand, \
                                  cost_acc_cand, cost_curv_cand] )
             print("Evaluated: ", ll_fit_list[-1])
 
@@ -775,12 +786,19 @@ class LaneFollower():
         ll_fit_final_list = []
         for cand_ind in best_cand_inds:
             cand_list = ll_fit_list[cand_ind]
-            temp1_cand, temp2_cand, sigma_acc_sq_cand, sigma_curv_sq_cand, cost_acc_cand, cost_curv_cand = cand_list[1:]
+
+            temp1_cand, temp2_cand, \
+            sigma_acc_sq_cand, sigma_curv_sq_cand, sigma_pos_sq_cand, \
+            cost_acc_cand, cost_curv_cand = cand_list[1:]
 
             self.temperatures = [temp1_cand, temp2_cand]
 
-            Q_eval = np.diag([sigma_acc_sq_cand, sigma_curv_sq_cand])
-            self.lane_ekf.update_Q_u(Q_eval)
+            Q_u_eval = np.diag([sigma_acc_sq_cand, sigma_curv_sq_cand])
+            self.lane_ekf.update_Q_u(Q_u_eval)
+
+            Q_z_eval = np.copy(self.lane_ekf.Q_z)
+            Q_z_eval[:2,:2] = np.eye(2) * sigma_pos_sq_cand
+            self.lane_ekf.update_Q_z(Q_z_eval)
 
             self.R_cost = np.diag([cost_acc_cand, cost_curv_cand])
 
@@ -788,13 +806,18 @@ class LaneFollower():
             metrics_df = compute_trajectory_metrics(predict_dict, ks_eval=[5])
 
             ll_result = np.mean(metrics_df.traj_LL_5)
-            ll_fit_final_list.append( [ll_result, temp1_cand, temp2_cand, sigma_acc_sq_cand, sigma_curv_sq_cand, cost_acc_cand, cost_curv_cand] )
+            ll_fit_final_list.append( [ll_result, temp1_cand, temp2_cand, \
+                                       sigma_acc_sq_cand, sigma_curv_sq_cand, sigma_pos_sq_cand, \
+                                       cost_acc_cand, cost_curv_cand] )
             print("Evaluated Final: ", ll_fit_final_list[-1])
 
         # Select the best candidate set and update values.
         ll_fit_final_list = np.array(ll_fit_final_list)
         best_fit_ind      = np.argmax(ll_fit_final_list[:,0])
-        _, bf_tmp1, bf_tmp2, bf_sigma_acc_sq, bf_sigma_curv_sq, bf_cost_acc, bf_cost_curv = ll_fit_final_list[best_fit_ind]
+
+        _, bf_tmp1, bf_tmp2, \
+        bf_sigma_acc_sq, bf_sigma_curv_sq, bf_sigma_pos_sq, \
+        bf_cost_acc, bf_cost_curv = ll_fit_final_list[best_fit_ind]
 
         self.temperatures = [bf_tmp1, bf_tmp2]
         print(f"BEST temperatures: {self.temperatures}")
@@ -802,6 +825,11 @@ class LaneFollower():
         self.lane_ekf.update_Q_u( np.diag([bf_sigma_acc_sq,
                                            bf_sigma_curv_sq]) )
         print(f"BEST Q_u: {self.lane_ekf.Q_u}")
+
+        Q_z_eval = np.copy(self.lane_ekf.Q_z)
+        Q_z_eval[:2,:2] = np.eye(2) * bf_sigma_pos_sq
+        self.lane_ekf.update_Q_z(Q_z_eval)
+        print(f"BEST Q_z: {np.diag(self.lane_ekf.Q_z)}")
 
         self.R_cost = np.diag( [bf_cost_acc, bf_cost_curv] )
         print(f"BEST R_cost: {self.R_cost}")

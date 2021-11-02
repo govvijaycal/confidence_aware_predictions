@@ -1,7 +1,7 @@
 import numpy as np
 
 class LaneEKF():
-    def __init__(self, Q_u, R_lane_frame):
+    def __init__(self, Q_u, Q_z, R_lane_frame):
         """
         EKF that is based upon tracking a lane.
 
@@ -15,12 +15,15 @@ class LaneEKF():
           Measurements: [x_{ALP}, y_{ALP}, theta_{ALP}] where ALP is the active lane point.
         """
 
-        self.nx = 4 # state dimension
+        self.nz = 4 # state dimension
         self.nu = 2 # input dimension
         self.nm = 3 # measurement dimension
 
-        self.z = np.zeros(self.nx) # mean
-        self.P = np.eye(self.nx)   # covariance
+        self.z = np.zeros(self.nz) # mean
+        self.P = np.eye(self.nz)   # covariance
+
+        # Position covariance due to unmodeled effects.
+        self.update_Q_z(Q_z)
 
         # Input covariance, i.e.
         # Q_u = diag(sigma^2_{acc}, sigma^2_{curv}).
@@ -32,6 +35,13 @@ class LaneEKF():
         assert np.allclose(R_lane_frame, R_lane_frame.T)
         assert np.linalg.det(R_lane_frame) > 0.
         self.R_lane_frame = R_lane_frame
+
+    def update_Q_z(self, Q_z):
+        # This is used to deal with issues of integration + unmodeled dynamics.
+        assert Q_z.shape == (self.nz, self.nz)
+        assert np.allclose(Q_z, Q_z.T)
+        assert np.linalg.det(Q_z) > 0.
+        self.Q_z = Q_z
 
     def update_Q_u(self, Q_u):
         # In theory, this should just be called once by the constructor.
@@ -48,7 +58,7 @@ class LaneEKF():
         z_next = self._dynamics_model(self.z, u, dt)
 
         self.z = z_next
-        self.P = A @ self.P @ A.T + B @ self.Q_u @ B.T
+        self.P = A @ self.P @ A.T + B @ self.Q_u @ B.T + self.Q_z
 
         return self.z, self.P, A, B
 
@@ -57,7 +67,7 @@ class LaneEKF():
         y = self.z[1]
         lane_pose, rot_local_to_global = lane_localizer.get_lane_measurement(x, y)
 
-        H = np.zeros((self.nm, self.nx))
+        H = np.zeros((self.nm, self.nz))
         H[:, :self.nm] = np.eye(self.nm)
 
         residual = lane_pose - H @ self.z
@@ -71,13 +81,13 @@ class LaneEKF():
 
         self.z    = self.z + K @ residual
         self.z[2] = self._bound_angle_within_pi(self.z[2])
-        self.P    = (np.eye(self.nx) - K @ H) @ self.P
+        self.P    = (np.eye(self.nz) - K @ H) @ self.P
 
         return self.z, self.P, residual, res_covar
 
     def _reset(self, z_init, P_init):
-        assert z_init.shape == (self.nx,)
-        assert P_init.shape == (self.nx, self.nx)
+        assert z_init.shape == (self.nz,)
+        assert P_init.shape == (self.nz, self.nz)
         self.z = z_init
         self.P = P_init
 
