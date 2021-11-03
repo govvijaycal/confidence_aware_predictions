@@ -50,9 +50,12 @@ class LanekeepingMPC:
 		# Velocity and Curvature Profile.
 		self.curv_ref_params = self.opti.parameter(2) # (m,b) for a linear interpolation s.t. curv(s) = m * s + b
 		self.v_ref           = self.opti.parameter()  # constant speed reference
-		self.z_ref    = casadi.horzcat(casadi.MX.zeros(1,3), self.v_ref)
+		self.z_ref           = casadi.horzcat(casadi.MX.zeros(1,3), self.v_ref)
 
-		# TODO: stopline constraints -> N_modes by N_timesteps by 2 [s_min, s_max]
+		# Constraints on "progress" variable s.  These intervals define free space for the EV from timestep 1 onwards,
+		# i.e.  s_lb[0] <= s_dv[1] <= s_ub[0] - so it's one ahead in index compared to s_dv below.
+		self.s_lb = self.opti.parameter(self.N)
+		self.s_ub = self.opti.parameter(self.N)
 
 		'''
 		(2) Decision Variables
@@ -70,22 +73,21 @@ class LanekeepingMPC:
 		## Control inputs used to achieve self.z_dv according to dynamics.
 		## First index is the timestep k, i.e. self.u_dv[0,:] is u_0.
 		## Second index is the input element as detailed below.
-		# TODO: will need to replicate by N_modes...
 		self.u_dv = self.opti.variable(self.N, 2)
 
 		self.acc_dv = self.u_dv[:,0]
 		self.df_dv  = self.u_dv[:,1]
 
-		# TODO: slack variables -> see where needed.
-		self.slacks           = self.opti.variable(2)
+		self.slacks           = self.opti.variable(3)
 		self.slack_ey         = self.slacks[0]
 		self.slack_decel_jerk = self.slacks[1]
+		self.slack_s          = self.slacks[2]
 
 		'''
 		(3) Problem Setup: Constraints, Cost, Initial Solve
 		'''
 		self._add_constraints()
-		self._add_stopline_constraints()
+		self._add_interval_constraints()
 
 		self._add_cost()
 
@@ -94,13 +96,13 @@ class LanekeepingMPC:
 		self._update_reference([0., 0.], 5.)
 
 		self._update_previous_input(0., 0.)
+		self._update_interval_constraints([0.]*self.N,
+			                              [1000.]*self.N )
 
 		# Ipopt with custom options: https://web.casadi.org/docs/ -> see sec 9.1 on Opti stack.
 		p_opts = {'expand': True} # http://casadi.sourceforge.net/api/internal/d4/d89/group__nlpsol.html
 		s_opts = {'print_level': 0} # https://coin-or.github.io/Ipopt/OPTIONS.html
 		self.opti.solver('ipopt', p_opts, s_opts)
-
-
 		sol = self.solve()
 
 	def _add_constraints(self):
@@ -149,8 +151,11 @@ class LanekeepingMPC:
 		# Other Constraints
 		self.opti.subject_to( 0 <= self.slacks )
 
-	def _add_stopline_constraints(self):
-		pass # TODO.
+	def _add_interval_constraints(self):
+		for i in range(self.N):
+			self.opti.subject_to( self.opti.bounded( self.s_lb[i] - self.slack_s,
+				                                     self.s_dv[i+1],
+				                                     self.s_ub[i] + self.slack_s) )
 
 	@staticmethod
 	def _quad_form(z, Q):
@@ -167,13 +172,11 @@ class LanekeepingMPC:
 
 		cost += (100  * self.slack_decel_jerk)
 		cost += (1000 * self.slack_ey)
-
-		# TODO: scenario implementation?
+		cost += (1e6  * self.slack_s)
 
 		self.opti.minimize( cost )
 
 	def solve(self):
-		# TODO: decide what to log.
 		st = time.time()
 		try:
 			sol = self.opti.solve()
@@ -205,10 +208,10 @@ class LanekeepingMPC:
 		return sol_dict
 
 	def update(self, update_dict):
-		self._update_initial_condition( *[update_dict[key] for key in ['s', 'ey', 'epsi', 'v']] )
+		self._update_initial_condition(*[update_dict[key] for key in ['s', 'ey', 'epsi', 'v']])
 		self._update_reference(*[update_dict[key] for key in ['curv_lin_fit', 'v_ref']])
-		self._update_previous_input( *[update_dict[key] for key in ['acc_prev', 'df_prev']] )
-		self._update_stopline_constraints() # TODO
+		self._update_previous_input(*[update_dict[key] for key in ['acc_prev', 'df_prev']])
+		self._update_interval_constraints(*[update_dict[key] for key in ['s_lb', 's_ub']])
 
 	def _update_initial_condition(self, s0, ey0, epsi0, vel0):
 		self.opti.set_value(self.z_curr, [s0, ey0, epsi0, vel0])
@@ -220,9 +223,9 @@ class LanekeepingMPC:
 	def _update_previous_input(self, acc_prev, df_prev):
 		self.opti.set_value(self.u_prev, [acc_prev, df_prev])
 
-	def _update_stopline_constraints(self):
-		# TODO
-		pass
+	def _update_interval_constraints(self, s_lb, s_ub):
+		self.opti.set_value(self.s_lb, s_lb)
+		self.opti.set_value(self.s_ub, s_ub)
 
 if __name__ == "__main__":
 	lk_mpc = LanekeepingMPC()
