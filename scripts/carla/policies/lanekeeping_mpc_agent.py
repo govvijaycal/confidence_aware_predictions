@@ -10,6 +10,7 @@ from policies.dynamic_agent import DynamicAgent
 from utils import frenet_trajectory_handler as fth
 from utils.low_level_control import LowLevelControl
 from policies.lanekeeping_mpc import LanekeepingMPC
+from policies.confidence_level_manager import ConfidenceLevelManager
 
 class LanekeepingMPCAgent(DynamicAgent):
     """ A lanekeeping agent using MPC and implementing optional stopline constraints. """
@@ -17,6 +18,7 @@ class LanekeepingMPCAgent(DynamicAgent):
     def __init__(self,
                  vehicle,
                  goal_location,
+                 conf_params_dict,        # Constructor params for confidence level manager.
                  N = 10,                  # MPC horizon
                  DT = 0.2,                # s, discretization time for MPC
                  dt = 0.05,               # s, control timestep
@@ -26,6 +28,9 @@ class LanekeepingMPCAgent(DynamicAgent):
         super().__init__(vehicle=vehicle,
                          goal_location=goal_location,
                          dt=dt)
+
+        # TODO: manage this.
+        #self.conf_level_manager = ConfidenceLevelManager(**conf_params_dict)
 
         # Underlying class used to solve/update MPC problem for lanekeeping.
         self.lk_mpc = LanekeepingMPC( N       = N,
@@ -67,6 +72,8 @@ class LanekeepingMPCAgent(DynamicAgent):
         u0=np.array([self.A_MIN, 0.])
         is_opt=False
         solve_time=np.nan
+
+        # TODO: consume the pred_dict via stopline constraints.
 
         self.update_completion(state_dict["s"])
 

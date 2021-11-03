@@ -32,6 +32,7 @@ from utils.vehicle_geometry_utils import vehicle_name_to_lf_lr
 scriptdir = os.path.abspath(__file__).split('scripts')[0] + 'scripts/'
 sys.path.append(scriptdir)
 from models.multipath import MultiPath
+from evaluation.gmm_prediction import GMMPrediction
 
 """
 Simulation parameter classes.
@@ -135,7 +136,10 @@ def get_vehicle_policy(vehicle_params, vehicle_actor, goal_transform, simulation
                                   lat_accel_max=2.0,
                                   is_rational = vehicle_params.policy_config["is_rational"])
     elif vehicle_params.policy_type == "lk_mpc":
+        # TODO: use the vehicle_params.policy_config to select out a conf threshold strategy
+        conf_params_dict = {}
         return LanekeepingMPCAgent(vehicle_actor, goal_transform.location, \
+                                   conf_params_dict,
                                    N=vehicle_params.N_mpc,
                                    DT=vehicle_params.dt_mpc,
                                    dt=simulation_dt,
@@ -260,7 +264,7 @@ class RunIntersectionScenario:
 
         # Needed for OpenCV/Carla world visualization.
         self.viz_params = drone_viz_params
-        self.mode_rgb_colors = [(255, 0, 255), (255, 255, 0), (0, 255, 255)] # TODO: autogenerate
+        self.mode_rgb_colors = [(255, 0, 255), (255, 255, 0), (0, 255, 255)]
 
     def run_scenario(self):
         # Return flag to indicate if this ran to completion.
@@ -337,19 +341,36 @@ class RunIntersectionScenario:
                     img_drone = cv2.resize(img_drone, (self.viz_params.img_width, self.viz_params.img_height), interpolation = cv2.INTER_AREA)
 
                     # Handle overlays on drone camera image.
+                    if self.viz_params.overlay_ego_info or self.viz_params.overlay_mode_probs:
+                        # Place a alpha-blended rectangle to make text reading easier.
+                        img_subregion = img_drone[10:110, 25:775, :].astype(np.float)
+                        img_mask      = 64*np.ones(img_subregion.shape, img_subregion.dtype)
+
+                        alpha         = 0.8
+                        img_comb      = alpha * img_mask + (1. - alpha) * img_subregion
+                        img_comb      = img_comb.astype(np.uint8)
+
+                        img_drone[10:110, 25:775, :] = img_comb
+
                     if self.viz_params.overlay_ego_info:
                         ego_str = f"EGO - v:{ego_speed:.3f}, th: {ego_ctrl.throttle:.2f}, bk: {ego_ctrl.brake:.2f}, st: {ego_ctrl.steer:.2f}"
                         cv2.putText(img_drone, ego_str, (50,50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
                     if self.viz_params.overlay_gmm:
-                        if tvs_valid_pred[0]: # TODO: generalize this to multiple TVs.
-                            self._viz_gmm(img_drone, pred_dict["tvs_mode_dists"])
+                         # We just deal with the first target vehicle for now.
+                         # TODO: generalize to other target vehicles.
+                        if pred_dict["tvs_valid_pred"][0]:
+                            mus    = pred_dict["tvs_mode_dists"][0][0]
+                            sigmas = pred_dict["tvs_mode_dists"][1][0]
+                            self._viz_gmm(img_drone, mus, sigmas)
 
                     if self.viz_params.overlay_traj_hist:
                         self._viz_traj_hist(img_drone)
 
                     if self.viz_params.overlay_mode_probs:
-                        if pred_dict["tvs_valid_pred"][0]: # TODO: generalize this to multiple TVs.
+                        # We just deal with the first target vehicle for now.
+                        # TODO: generalize to other target vehicles.
+                        if pred_dict["tvs_valid_pred"][0]:
                             cv2.putText(img_drone, "Mode probabilities: ", (50,100), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
                             for prob_idx, mode_prob in enumerate(pred_dict["tvs_mode_probs"][0]):
                                 cv2.putText(img_drone, f"{mode_prob:.3f}",
@@ -392,6 +413,7 @@ class RunIntersectionScenario:
     def _make_predictions(self):
         """
         This returns GMM predictions of target vehicles in a useable format for MPC modules.
+        Note that the predictions are in the world/global frame, not in the target vehicle's local frame.
 
         We use the following notation:
                    N_TV: number of target vehicles.
@@ -399,7 +421,7 @@ class RunIntersectionScenario:
           ego_num_modes: number of GMM modes to return (maximum)
 
         The format is as follows:
-          tvs_positions  : [ Vehicle i's XY coords, np.ndarray with size (2,) ]_{i=1}^{N_TV}
+          tvs_poses      : [ Vehicle i's (X,Y,theta) coords, np.ndarray with size (3,) ]_{i=1}^{N_TV}
           tvs_mode_probs : [ GMM mode distribution for vehicle i, np.ndarray with size (ego_num_modes,) ]_{i=1}^{N_TV}
           tvs_mode_dists : [
                              [ GMM mean prediction for vehicle i, np.ndarray with size (ego_num_modes, ego_N, 2) ]_{i=1}^{N_TV},
@@ -411,10 +433,10 @@ class RunIntersectionScenario:
             # No TVs in the scene so we make a fake constant pose prediction that is over a km away from the EV.
             ego_location = self.vehicle_actors[self.ego_vehicle_idx].get_location()
             ego_x, ego_y = ego_location.x, -ego_location.y
-            curr_target_vehicle_position = [1000 + ego_x, 1000 + ego_y]
-            tvs_positions = [curr_target_vehicle_position]
+            curr_target_vehicle_pose = np.array([1000 + ego_x, 1000 + ego_y, 0.])
+            tvs_poses = [curr_target_vehicle_pose]
             tvs_mode_probs = [ np.ones(self.ego_num_modes) / self.ego_num_modes ]
-            tvs_mode_dists = [[np.stack([[curr_target_vehicle_position]*self.ego_N]*self.ego_num_modes)],
+            tvs_mode_dists = [[np.stack([[curr_target_vehicle_pose[:2]]*self.ego_N]*self.ego_num_modes)],
                               [np.stack([[np.identity(2)]*self.ego_N]*self.ego_num_modes)]]
             tvs_valid_pred = [False]
         else:
@@ -424,7 +446,9 @@ class RunIntersectionScenario:
                 get_target_agent_history(self.agent_history, target_agent_id)
 
             curr_target_vehicle_position = R_target_to_world @ past_states_tv[-1, 1:3] + t_target_to_world
-            tvs_positions = [curr_target_vehicle_position]
+            curr_target_vehicle_yaw      = np.arctan2(R_target_to_world[1][0], R_target_to_world[0][0])
+            curr_target_vehicle_pose     = np.append(curr_target_vehicle_position, curr_target_vehicle_yaw)
+            tvs_poses = [curr_target_vehicle_pose]
 
             if np.any(np.isnan(past_states_tv)):
                 # Not enough data for predictions to be made.
@@ -438,14 +462,31 @@ class RunIntersectionScenario:
                 # modes and self.ego_N timesteps.
                 img_tv = self.rasterizer.rasterize(self.agent_history, target_agent_id)
                 gmm_pred_tv = self.pred_model.predict_instance(img_tv, past_states_tv[:-1])
-                gmm_pred_tv.transform(R_target_to_world, t_target_to_world)
+
+                if type(gmm_pred_tv) is dict:
+                    modes = list(gmm_pred_tv.keys())
+                    mode_probs  = np.array([gmm_pred_tv[k]["mode_probability"] for k in modes])
+                    mus         = np.array([gmm_pred_tv[k]["mus"] for k in modes])
+                    sigmas      = np.array([gmm_pred_tv[k]["sigmas"] for k in modes])
+                    n_modes     = len(modes)
+                    n_timesteps = mus.shape[1]
+
+                    gmm_pred_tv = GMMPrediction(n_modes, n_timesteps, mode_probs, mus, sigmas)
+
+                elif type(gmm_pred_tv) is GMMPrediction:
+                    pass
+
+                else:
+                    raise TypeError(f"Unexpected GMM type: {type(gmm_pred_tv)}")
+
                 gmm_pred_tv=gmm_pred_tv.get_top_k_GMM(self.ego_num_modes)
+                gmm_pred_tv.transform(R_target_to_world, t_target_to_world)
 
                 tvs_mode_probs = [gmm_pred_tv.mode_probabilities]
                 tvs_mode_dists = [[gmm_pred_tv.mus[:, :self.ego_N, :]], [gmm_pred_tv.sigmas[:, :self.ego_N, :, :]]]
                 tvs_valid_pred = [True]
 
-        pred_dict = {"tvs_positions"  : tvs_positions,
+        pred_dict = {"tvs_poses"      : tvs_poses,
                      "tvs_mode_probs" : tvs_mode_probs,
                      "tvs_mode_dists" : tvs_mode_dists,
                      "tvs_valid_pred" : tvs_valid_pred}
@@ -567,9 +608,11 @@ class RunIntersectionScenario:
         self.pred_model.predict_instance(image_raw   = blank_image,
                                          past_states = zero_traj)
 
-    def _viz_gmm(self, img, tvs_mode_dists, mdist_sq_thresh=5.991):
-        mus    = tvs_mode_dists[0][0] # N_modes by N by 2
-        sigmas = tvs_mode_dists[1][0] # N_modes by N by 2 by 2
+    def _viz_gmm(self, img, mus, sigmas, mdist_sq_thresh=5.991):
+        # This overlays a set of confidence ellipsoids based on the GMM defined by {mus, sigmas} on img.
+        # mdist_sq_thresh is the critical value used for the Chi-Square CDF (and is the Mahalanobis dist squared).
+        # mus: N_modes by N by 2
+        # sigmas: N_modes by N by 2 by 2
 
         # Note: we reverse mode_dists and colors s.t. least probable mode is plotted first.
         zip_obj = zip( reversed(mus), reversed(sigmas), reversed(self.mode_rgb_colors) )
