@@ -11,6 +11,7 @@ from utils import frenet_trajectory_handler as fth
 from utils.low_level_control import LowLevelControl
 from policies.lanekeeping_mpc import LanekeepingMPC
 from policies.confidence_level_manager import ConfidenceLevelManager
+from policies.lane_interval_manager import LaneIntervalManager
 
 class LanekeepingMPCAgent(DynamicAgent):
     """ A lanekeeping agent using MPC and implementing optional stopline constraints. """
@@ -29,8 +30,8 @@ class LanekeepingMPCAgent(DynamicAgent):
                          goal_location=goal_location,
                          dt=dt)
 
-        # TODO: manage this.
-        #self.conf_level_manager = ConfidenceLevelManager(**conf_params_dict)
+        #self.conf_level_manager = ConfidenceLevelManager(**conf_params_dict) # TODO
+        self.lane_interval_manager = LaneIntervalManager(self._frenet_traj, DT, self.A_MIN, self.A_MAX)
 
         # Underlying class used to solve/update MPC problem for lanekeeping.
         self.lk_mpc = LanekeepingMPC( N       = N,
@@ -73,8 +74,6 @@ class LanekeepingMPCAgent(DynamicAgent):
         is_opt=False
         solve_time=np.nan
 
-        # TODO: consume the pred_dict via stopline constraints.
-
         self.update_completion(state_dict["s"])
 
         if self.done():
@@ -85,7 +84,25 @@ class LanekeepingMPCAgent(DynamicAgent):
             buffer_idx_end = min(len(self.speed_profile) - 1, buffer_idx_st + self.preview)
             v_des          = np.amin(self.speed_profile[buffer_idx_st:buffer_idx_end]) # desired speed with preview
 
-            curv_lin_fit         = self._fit_local_curvature(buffer_idx_st, buffer_idx_end)
+            curv_lin_fit   = self._fit_local_curvature(buffer_idx_st, buffer_idx_end)
+
+            # Update obstacle avoidance (i.e. interval) constraints.
+            #conf_threshs = self.confidence_level_manager.update(pred_dict)                        # TODO - > should be an old pred_dict here...
+            if pred_dict["tvs_valid_pred"][0]:
+              s0_ev  = state_dict["s"]
+              v0_ev  = state_dict["speed"]
+              x0_tv  = pred_dict["tvs_poses"][0][0]
+              y0_tv  = pred_dict["tvs_poses"][0][1]
+              mus    = pred_dict["tvs_mode_dists"][0][0]
+              sigmas = pred_dict["tvs_mode_dists"][1][0]
+              conf_threshs = 3.00 * np.ones(len(mus))
+              s_lb, s_ub  = self.lane_interval_manager.generate_interval_constraints(s0_ev, v0_ev,
+                                                                                     x0_tv, y0_tv,
+                                                                                     conf_threshs,
+                                                                                     mus, sigmas)
+            else:
+              s_lb = np.zeros(len(self.lk_mpc.N))
+              s_ub = np.ones((len(self.lk_mpc.N))) * self._frenet_traj.trajectory[-1, 0]
 
             # Update MPC initial conditions and parameters.
             update_dict = {}
@@ -97,10 +114,14 @@ class LanekeepingMPCAgent(DynamicAgent):
             update_dict["v_ref"]        = v_des
             update_dict["acc_prev"]     = self.acc_prev
             update_dict["df_prev"]      = self.df_prev
+            update_dict["s_lb"]         = s_lb
+            update_dict["s_ub"]         = s_ub
             self.lk_mpc.update(update_dict)
 
             # Solve the MPC problem.
             sol_dict = self.lk_mpc.solve()
+
+            # TODO: handling infeasibility or slack constraints?
 
             # Extract solution and log results.
             u0         = sol_dict["u_control"]

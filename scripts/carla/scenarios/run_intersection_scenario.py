@@ -27,7 +27,7 @@ from policies.lanekeeping_mpc_agent import LanekeepingMPCAgent
 from rasterizer.agent_history import AgentHistory
 from rasterizer.sem_box_rasterizer import SemBoxRasterizer
 from utils.frenet_trajectory_handler import fix_angle
-from utils.vehicle_geometry_utils import vehicle_name_to_lf_lr
+from utils.vehicle_geometry_utils import vehicle_name_to_dimensions
 
 scriptdir = os.path.abspath(__file__).split('scripts')[0] + 'scripts/'
 sys.path.append(scriptdir)
@@ -136,8 +136,12 @@ def get_vehicle_policy(vehicle_params, vehicle_actor, goal_transform, simulation
                                   lat_accel_max=2.0,
                                   is_rational = vehicle_params.policy_config["is_rational"])
     elif vehicle_params.policy_type == "lk_mpc":
-        # TODO: use the vehicle_params.policy_config to select out a conf threshold strategy
-        conf_params_dict = {}
+        # TODO: use the vehicle_params.policy_config to select out a conf threshold strategy.
+        # TODO: fix # of modes and confidence params.
+        conf_params_dict = {"n_gmm_modes" : vehicle_params.N_modes,
+                            "n_steps_sliding_window" : int(1.0/simulation_dt),
+                            "is_adaptive" : False}
+
         return LanekeepingMPCAgent(vehicle_actor, goal_transform.location, \
                                    conf_params_dict,
                                    N=vehicle_params.N_mpc,
@@ -280,9 +284,9 @@ class RunIntersectionScenario:
         self.results_dict = {}
         for ind_vehicle, vehicle in enumerate(self.vehicle_actors):
             key = f"{vehicle.attributes['role_name']}_{ind_vehicle}"
-            l_f, l_r = vehicle_name_to_lf_lr(vehicle.type_id) # e.g. "vehicle.audi.tt"
-            self.results_dict[key] = {"l_f"              : l_f,
-                                      "l_r"              : l_r,
+            dims = vehicle_name_to_dimensions(vehicle.type_id) # e.g. "vehicle.audi.tt"
+            self.results_dict[key] = {"l_f"              : dims["lf"],
+                                      "l_r"              : dims["lr"],
                                       "state_trajectory" : [],
                                       "input_trajectory" : [],
                                       "feasibility"      : [],
@@ -428,6 +432,7 @@ class RunIntersectionScenario:
                              [ GMM covar prediction for vehicle i, np.ndarray with size (ego_num_modes, ego_N, 2, 2) ]_{i=1}^{N_TV}
                            ]
           tvs_valid_pred : [ Flag indicating if vehicle i's prediction are real or spoofed, bool ]_{i=1}^{N_TV}
+          tv_dimensions  : [ Dict containing vehicle geometry parameters ]_{i=1}^{N_TV}
         """
         if len(self.tv_vehicle_idxs) == 0:
             # No TVs in the scene so we make a fake constant pose prediction that is over a km away from the EV.
@@ -457,6 +462,8 @@ class RunIntersectionScenario:
                 tvs_mode_dists = [[np.stack([[curr_target_vehicle_position]*self.ego_N]*self.ego_num_modes)],
                                   [np.stack([[0.1*np.identity(2)]*self.ego_N]*self.ego_num_modes)]]
                 tvs_valid_pred = [False]
+                tv_dimensions = [{}]
+
             else:
                 # Nominal case: query the prediction model and parse GMM preds, truncating to self.ego_num_modes
                 # modes and self.ego_N timesteps.
@@ -485,11 +492,13 @@ class RunIntersectionScenario:
                 tvs_mode_probs = [gmm_pred_tv.mode_probabilities]
                 tvs_mode_dists = [[gmm_pred_tv.mus[:, :self.ego_N, :]], [gmm_pred_tv.sigmas[:, :self.ego_N, :, :]]]
                 tvs_valid_pred = [True]
+                tv_dimensions = [vehicle_name_to_dimensions(self.vehicle_actors[self.tv_vehicle_idxs[0]].type_id)]
 
         pred_dict = {"tvs_poses"      : tvs_poses,
                      "tvs_mode_probs" : tvs_mode_probs,
                      "tvs_mode_dists" : tvs_mode_dists,
-                     "tvs_valid_pred" : tvs_valid_pred}
+                     "tvs_valid_pred" : tvs_valid_pred,
+                     "tvs_dimensions" : tvs_dimensions}
 
         return pred_dict
 

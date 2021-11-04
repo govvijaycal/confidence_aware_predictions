@@ -20,3 +20,8 @@
 
 	Note: the easy_install method didn't work for me, but this pythonpath modification works.
         Note2: I use a bash script in the repo with Carla to make above path modifications (adjust_path.sh).  Only need to run this prior to running any Carla code.
+
+(5) Installed pytope after the fact.  Needed gmp for the dependencies to work:
+sudo apt-get install  libgmp3-dev
+pip install pytope
+

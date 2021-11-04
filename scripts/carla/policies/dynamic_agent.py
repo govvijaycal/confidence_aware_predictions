@@ -16,7 +16,7 @@ from navigation.global_route_planner_dao import GlobalRoutePlannerDAO
 scriptdir = os.path.abspath(__file__).split('carla')[0] + 'carla/'
 sys.path.append(scriptdir)
 from utils import frenet_trajectory_handler as fth
-from utils.vehicle_geometry_utils import vehicle_name_to_lf_lr
+from utils.vehicle_geometry_utils import vehicle_name_to_dimensions
 
 class DynamicAgent(ABC):
     """ A path following agent with collision avoidance constraints over a short horizon. """
@@ -38,7 +38,9 @@ class DynamicAgent(ABC):
         way_s, way_xy, way_yaw = fth.extract_path_from_waypoints(route)
         self._frenet_traj = fth.FrenetTrajectoryHandler(way_s, way_xy, way_yaw, s_resolution=0.5)
 
-        self.lf, self.lr = vehicle_name_to_lf_lr(self.vehicle.type_id)
+        vehicle_dims = vehicle_name_to_dimensions(self.vehicle.type_id)
+        self.lf = vehicle_dims["lf"]
+        self.lr = vehicle_dims["lr"]
 
         self.DT      =  dt # control timestep, s
         self.A_MIN   = -3.0  # min accel, m/s^2

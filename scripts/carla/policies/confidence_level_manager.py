@@ -1,26 +1,39 @@
 import numpy as np
+from collections import deque
 
 class ConfidenceLevelManager:
 
 	def __init__(self,
 		         n_gmm_modes,
 		         n_steps_sliding_window,
+		         is_adaptive,
 		         conf_level_init = 4.61,
-		         conf_level_min = 3.22,
+		         conf_level_min = 2.00,
 		         alpha=0.1):
+
 		# For a 2-degree-of-freedom chi-square distribution,
 		# here are critical values:
+		# 0.40 -> 1.00
+		# 0.63 -> 2.00
 		# 0.8  -> 3.22
 		# 0.9  -> 4.61
 		# 0.95 -> 5.99
 
 		self.n_modes        = n_gmm_modes
+		self.pred_buffer    = deque(maxlen=n_steps_sliding_window)
+		self.is_adaptive    = is_adaptive
 		self.conf_level_min = conf_level_min
 		self.alpha          = alpha
 
 		self.mode_conf_levels = np.ones(self.n_modes) * conf_level_init
 
 	def update(self, traj, gmm_pred):
+		if not self.is_adaptive or len(self.pred_buffer) < self.pred_buffer.maxlen:
+			return
+		else:
+			raise NotImplementedError
+
+
 		# TODO: deal with the sliding window stuff.
 		# Find the closest mode in the GMM to the traj.
 		# sigma level for the closest mode
