@@ -30,7 +30,7 @@ class LanekeepingMPC:
 		         EY_MAX     =  1.0,
 		         V_MIN      =  0.0,          # min/max speed (m/s)
 		         V_MAX      = 20.0,
-				 Q = [0., 1., 100., 0.1],     # weights on s, ey, epsi, v
+				 Q = [0., 1., 10., 0.1],     # weights on s, ey, epsi, v
 				 R = [10., 1000.]):          # input rate weights on ax, df
 
 		for key in list(locals()):

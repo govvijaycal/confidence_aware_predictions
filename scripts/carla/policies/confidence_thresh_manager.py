@@ -8,7 +8,8 @@ class ConfidenceThreshManager:
                  is_adaptive,
                  conf_thresh_init,
                  conf_thresh_min  = 0.211,
-                 alpha=0.9):
+                 conf_thresh_max  = 13.8,
+                 alpha=0.8):
 
         # For a 2-degree-of-freedom chi-square distribution,
         # here are critical values:
@@ -19,6 +20,8 @@ class ConfidenceThreshManager:
         # 0.80 -> 3.22
         # 0.90 -> 4.61
         # 0.95 -> 5.99
+        # 0.99 -> 9.21
+        # 0.999 -> 13.8
 
         # Assumption is that the user properly chooses when to update.
         # It should be at the time discretization of the prediction/MPC model.
@@ -29,6 +32,7 @@ class ConfidenceThreshManager:
         self.pred_buffer     = deque(maxlen=n_buffer_size)
         self.is_adaptive     = is_adaptive
         self.conf_thresh_min = conf_thresh_min
+        self.conf_thresh_max = conf_thresh_max
         self.alpha           = alpha
 
         self.conf_thresh     = conf_thresh_init
@@ -56,23 +60,37 @@ class ConfidenceThreshManager:
             # t - buff_len + 1, ..., t, where t is the current timestep.
             assert tv_traj_sw.shape == (self.pred_buffer.maxlen, 2)
 
-            # Iterate over modes and find lowest conf thresh required to capture tv_traj over the buffer window.
-            smallest_mdist_sq_per_timestep = np.ones(self.pred_buffer.maxlen, dtype=np.float64) * np.finfo(dtype=np.float64).max
+            # Check if the tv is moving or not.
+            is_stationary_tv = False
+            displacement_traj = np.linalg.norm( np.diff(tv_traj_sw, axis=0), axis=1)
+            if np.all(displacement_traj < 0.1):
+                is_stationary_tv = True
 
-            for mode in range(n_modes):
-                for tm_step in range(self.pred_buffer.maxlen):
-                    curr_tv_xy = tv_traj_sw[tm_step, :]
-                    mean       = mus[mode][tm_step]
-                    covar      = sigmas[mode][tm_step]
+            if is_stationary_tv:
+               # For a stopped vehicle, we can keep the confidence threshold at minimum.
+               conf_thresh_curr = self.conf_thresh_min
+            else:
+                # For a moving vehicle, we can identify the conf thresh as below:
 
-                    residual = curr_tv_xy - mean
-                    mdist_sq = residual.T @ np.linalg.pinv(covar) @ residual
+                # Iterate over modes and find lowest conf thresh required to capture tv_traj over the buffer window.
+                smallest_mdist_sq_per_timestep = np.ones(self.pred_buffer.maxlen, dtype=np.float64) * np.finfo(dtype=np.float64).max
 
-                    smallest_mdist_sq_per_timestep[tm_step] = min(smallest_mdist_sq_per_timestep[tm_step], mdist_sq)
+                for mode in range(n_modes):
+                    for tm_step in range(self.pred_buffer.maxlen):
+                        curr_tv_xy = tv_traj_sw[tm_step, :]
+                        mean       = mus[mode][tm_step]
+                        covar      = sigmas[mode][tm_step]
 
-            maxmin_mdist_sq = np.max(smallest_mdist_sq_per_timestep)
+                        residual = curr_tv_xy - mean
+                        mdist_sq = residual.T @ np.linalg.pinv(covar) @ residual
+
+                        smallest_mdist_sq_per_timestep[tm_step] = min(smallest_mdist_sq_per_timestep[tm_step], mdist_sq)
+
+                maxmin_mdist_sq = np.max(smallest_mdist_sq_per_timestep)
+                conf_thresh_curr = max(self.conf_thresh_min, maxmin_mdist_sq)
 
             # Low pass filter update for conf thresh.
-            self.conf_thresh = self.alpha * max(self.conf_thresh_min, maxmin_mdist_sq) + (1. - self.alpha) * self.conf_thresh
+            self.conf_thresh = self.alpha * conf_thresh_curr + (1. - self.alpha) * self.conf_thresh
+            self.conf_thresh = np.clip(self.conf_thresh, self.conf_thresh_min, self.conf_thresh_max )
 
         self.pred_buffer.append(pred_dict)
