@@ -10,7 +10,7 @@ from policies.dynamic_agent import DynamicAgent
 from utils import frenet_trajectory_handler as fth
 from utils.low_level_control import LowLevelControl
 from policies.lanekeeping_mpc import LanekeepingMPC
-from policies.confidence_level_manager import ConfidenceLevelManager
+from policies.confidence_thresh_manager import ConfidenceThreshManager
 from policies.lane_interval_manager import LaneIntervalManager
 
 class LanekeepingMPCAgent(DynamicAgent):
@@ -30,8 +30,8 @@ class LanekeepingMPCAgent(DynamicAgent):
                          goal_location=goal_location,
                          dt=dt)
 
-        #self.conf_level_manager = ConfidenceLevelManager(**conf_params_dict) # TODO
-        self.lane_interval_manager = LaneIntervalManager(self._frenet_traj, DT, self.A_MIN, self.A_MAX)
+        self.confidence_thresh_manager   = ConfidenceThreshManager(**conf_params_dict)
+        self.lane_interval_manager       = LaneIntervalManager(self._frenet_traj, DT, self.A_MIN, self.A_MAX)
 
         # Underlying class used to solve/update MPC problem for lanekeeping.
         self.lk_mpc = LanekeepingMPC( N       = N,
@@ -62,6 +62,9 @@ class LanekeepingMPCAgent(DynamicAgent):
                                                   k_v=0.5,
                                                   k_i=0.01)
 
+        # Use of elapsed time to decide when to update confidence_thresh_manager.
+        self.elapsed_time = 0.
+
     def run_step(self, pred_dict):
         state_dict = self.get_current_state()
 
@@ -86,23 +89,27 @@ class LanekeepingMPCAgent(DynamicAgent):
 
             curv_lin_fit   = self._fit_local_curvature(buffer_idx_st, buffer_idx_end)
 
-            # Update obstacle avoidance (i.e. interval) constraints.
-            #conf_threshs = self.confidence_level_manager.update(pred_dict)                        # TODO - > should be an old pred_dict here...
+            # Update obstacle avoidance (i.e. interval) constraints at prediction time discretization.
+            if pred_dict["tvs_valid_pred"][0] and np.isclose(self.elapsed_time % self.lk_mpc.DT, 0.):
+              self.confidence_thresh_manager.update(pred_dict)
+
+            # Get MPC initial conditions and parameters.
             if pred_dict["tvs_valid_pred"][0]:
-              s0_ev  = state_dict["s"]
-              v0_ev  = state_dict["speed"]
-              x0_tv  = pred_dict["tvs_poses"][0][0]
-              y0_tv  = pred_dict["tvs_poses"][0][1]
-              mus    = pred_dict["tvs_mode_dists"][0][0]
-              sigmas = pred_dict["tvs_mode_dists"][1][0]
-              conf_threshs = 3.00 * np.ones(len(mus))
-              s_lb, s_ub  = self.lane_interval_manager.generate_interval_constraints(s0_ev, v0_ev,
-                                                                                     x0_tv, y0_tv,
-                                                                                     conf_threshs,
-                                                                                     mus, sigmas)
+              s0_ev   = state_dict["s"]
+              v0_ev   = state_dict["speed"]
+              x0_tv   = pred_dict["tvs_poses"][0][0]
+              y0_tv   = pred_dict["tvs_poses"][0][1]
+              mus     = pred_dict["tvs_mode_dists"][0][0]
+              sigmas  = pred_dict["tvs_mode_dists"][1][0]
+              tv_dims = pred_dict["tvs_dimensions"][0]
+              conf_threshs = self.confidence_thresh_manager.conf_thresh * np.ones(len(mus))
+              s_lb, s_ub   = self.lane_interval_manager.generate_interval_constraints(s0_ev, v0_ev, v_des,
+                                                                                      x0_tv, y0_tv,
+                                                                                      conf_threshs,
+                                                                                      mus, sigmas, tv_dims)
             else:
-              s_lb = np.zeros(len(self.lk_mpc.N))
-              s_ub = np.ones((len(self.lk_mpc.N))) * self._frenet_traj.trajectory[-1, 0]
+              s_lb = np.zeros(self.lk_mpc.N)
+              s_ub = np.ones((self.lk_mpc.N)) * self._frenet_traj.trajectory[-1, 0]
 
             # Update MPC initial conditions and parameters.
             update_dict = {}
@@ -121,9 +128,9 @@ class LanekeepingMPCAgent(DynamicAgent):
             # Solve the MPC problem.
             sol_dict = self.lk_mpc.solve()
 
-            # TODO: handling infeasibility or slack constraints?
-
             # Extract solution and log results.
+            # NOTE: we don't worry about infeasibility due to slack
+            # variables being active, just focusing on the resultant motion.
             u0         = sol_dict["u_control"]
             is_opt     = sol_dict["optimal"]
             solve_time = sol_dict["solve_time"]
@@ -137,6 +144,7 @@ class LanekeepingMPCAgent(DynamicAgent):
                                                   v_des,               # v_mpc
                                                   u0[1])               # df_des
 
+        self.elapsed_time = self.elapsed_time + self.lk_mpc.DT_CTRL
         return control, z0, u0, is_opt, solve_time
 
     ################################################################################################
@@ -155,5 +163,8 @@ class LanekeepingMPCAgent(DynamicAgent):
         A = np.column_stack((s_fit, np.ones(len(s_fit))))
         y = curv_fit
 
-        return np.linalg.lstsq(A, y, rcond=None)[0]
+        if(len(s_fit) == self.preview):
+          return np.linalg.lstsq(A, y, rcond=None)[0]
+        else:
+          return np.array([0., 0.])
 

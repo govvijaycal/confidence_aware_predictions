@@ -16,17 +16,21 @@ class LaneIntervalManager:
 
         self.frenet_traj_h       = frenet_traj_h
         self.lane_width          = lane_width
+
+        self.ev_half_length      = 2.5 # meters, estimate of CoG to bumper distance
+        s_resolution             = self.frenet_traj_h.trajectory[1,0] - self.frenet_traj_h.trajectory[0,0]
+        self.obs_buff            = int(self.ev_half_length / s_resolution)
         self.left_lane_boundary  = self.frenet_traj_h.get_left_boundary(offset=lane_width/2.)
         self.right_lane_boundary = self.frenet_traj_h.get_right_boundary(offset=lane_width/2.)
         self.s_lane              = self.frenet_traj_h.trajectory[:,0]
 
-    def generate_interval_constraints(self, s0_ev, v0_ev, x0_tv, y0_tv, conf_threshs, mus, sigmas):
+    def generate_interval_constraints(self, s0_ev, v0_ev, v_des, x0_tv, y0_tv, conf_threshs, mus, sigmas, tv_dims):
         # Check inputs.
         n_modes, n_timesteps, n_state = mus.shape
 
-        assert n_state           == 2
+        assert n_state            == 2
         assert conf_threshs.shape == (n_modes,)
-        assert sigmas.shape      == (n_modes, n_timesteps, n_state, n_state)
+        assert sigmas.shape       == (n_modes, n_timesteps, n_state, n_state)
 
         # Convert the tuple (conf_threshs, mus, sigmas) into a collection of polytopes for each mode.
         tv_conf_sets_by_mode       = self._get_conf_sets(conf_threshs, mus, sigmas)
@@ -38,14 +42,10 @@ class LaneIntervalManager:
         tv_occupancy_sets_by_mode  = self._get_tv_occupancy_sets(tv_conf_sets_by_mode, tv_poses_by_mode, tv_dims)
 
         # Project the TV occupancy sets onto the lane to get occupied lane intervals over all modes per timestep.
-        s_occupied_intervals         = self._get_occupied_intervals(tv_occupancy_sets_by_mode)
+        s_occupied_intervals       = self._get_occupied_intervals(tv_occupancy_sets_by_mode)
 
         # Find a feasible set of "interval traversals" for the EV s.t. that avoids the TV by remaining in free intervals.
-        s_lb, s_ub                 = self._find_feasible_interval_traversal(s0_ev, v0_ev, s_occupied_intervals)
-
-        # TMP CHECK
-        import pdb; pdb.set_trace()
-        # END TMP CHECK
+        s_lb, s_ub                 = self._find_feasible_interval_traversal(s0_ev, v0_ev, v_des, s_occupied_intervals)
 
         return s_lb, s_ub
 
@@ -63,8 +63,8 @@ class LaneIntervalManager:
                 length_ax1 = np.sqrt(ct * evals[0]) # half the first axis diameter
                 length_ax2 = np.sqrt(ct * evals[1]) # half the second axis diameter
 
-                ang_1 = np.degrees( np.arctan2(evecs[1,0], evecs[0,0]) )
-                ang_2 = np.degrees( np.arctan2(evecs[1,1], evecs[0,1]) )
+                ang_1 = np.arctan2(evecs[1,0], evecs[0,0])
+                ang_2 = np.arctan2(evecs[1,1], evecs[0,1])
 
                 a = length_ax1 * np.array([np.cos(ang_1), np.sin(ang_1)])
                 b = length_ax2 * np.array([np.cos(ang_2), np.sin(ang_2)])
@@ -73,10 +73,6 @@ class LaneIntervalManager:
                                       mu - a + b, mu - a - b))
 
                 conf_set_polytope = pytope.Polytope(vertices)
-
-                # DEBUG CHECK TMP.
-                import pdb; pdb.set_trace()
-                # END DEBUG CHECK TMP.
 
                 tv_conf_sets_by_timestep.append(conf_set_polytope)
 
@@ -88,18 +84,14 @@ class LaneIntervalManager:
     def _get_mean_tv_poses(x0_tv, y0_tv, mus):
         # Returns a collection of pose trajectories as [ np.ndarray([yaw traj in mode j]) ]_{j=1}^{N_modes}.
         # These pose trajectories correspond to the mean behavior (i.e. following mus exactly).
-        init_tv_position   = np.array([x0_tv, y0_tv])
+        init_tv_position   = np.array([x0_tv, y0_tv]).reshape((1,2))
 
         tv_poses_by_mode = []
         for mu in mus:
-            tv_mean_traj = np.concatenate((init_tv_position, tv_poses_by_mode), axis=0)
+            tv_mean_traj = np.concatenate((init_tv_position, mu), axis=0)
             tv_diff_traj = np.diff(tv_mean_traj, axis=0)
             tv_pose_traj = np.arctan2(tv_diff_traj[:,1], tv_diff_traj[:,0])
             tv_poses_by_mode.append(tv_pose_traj)
-
-            # DEBUG CHECK TMP.
-            import pdb; pdb.set_trace()
-            # END DEBUG CHECK TMP.
 
         return tv_poses_by_mode
 
@@ -123,10 +115,6 @@ class LaneIntervalManager:
         for (tv_conf_set_traj, tv_pose_traj) in zip(tv_conf_sets_by_mode, tv_poses_by_mode):
             tv_occupancy_sets_by_timestep = []
             for (tv_conf_set, tv_pose) in zip(tv_conf_set_traj, tv_pose_traj):
-                # DEBUG CHECK TMP.
-                import pdb; pdb.set_trace()
-                # END DEBUG CHECK TMP.
-
                 tv_bbox_polytope      = rotate_by(tv_pose) * tv_shape_polytope
                 tv_occupancy_polytope = tv_bbox_polytope + tv_conf_set
                 tv_occupancy_sets_by_timestep.append(tv_occupancy_polytope)
@@ -151,7 +139,7 @@ class LaneIntervalManager:
 
         s_occupied_intervals = []
         for t in range(n_steps):
-            s_occupied = np.zeros((len(self.left_lane_boundary)), type=np.bool)
+            s_occupied = np.zeros((len(self.left_lane_boundary)), dtype=np.bool)
 
             for m in range(n_modes):
                 tv_occ_set = tv_occupancy_sets_by_mode[m][t]
@@ -163,31 +151,26 @@ class LaneIntervalManager:
                 s_occupied = np.logical_or(s_occupied,
                                            polytope_containment(A, b, self.right_lane_boundary))
 
-                # TMP CHECK
-                import pdb; pdb.set_trace()
-                # END TMP CHECK
-
             s_occupied_intervals.append(s_occupied)
 
         return s_occupied_intervals
 
 
-    def _find_feasible_interval_traversal(self, s0, v0, s_occupied_intervals):
+    def _find_feasible_interval_traversal(self, s0, v0, v_des, s_occupied_intervals):
         # Greedy approach to identify free intervals along the lane for the EV to travel to over time.
 
         def should_brake(s, v, s_occ):
-            import pdb; pdb.set_trace()
             if s < 0 or s > self.s_lane[-1]:
                 raise ValueError(f"Invalid value s out of lane bounds: {s} in interval [0, {self.s_lane[-1]}")
 
             # Compute braking distance and determine where we'd stop.
-            s_stopped = s +  v**2 / (2 * abs(self.A_MIN))
+            s_stopped = s +  v**2 / (2. * abs(self.A_MIN))
 
             # Consider the region within the braking distance. We care about front collisions
             # and assume that rear collisions are not our responsibility.
             s_st_ind  = np.argmin(np.abs(self.s_lane - s))
             s_end_ind = np.argmin(np.abs(self.s_lane - s_stopped))
-            s_end_ind = max(s_end_ind + self.obs_buff, len(self.s_lane) - 1)
+            s_end_ind = min(s_end_ind + self.obs_buff, len(self.s_lane) - 1)
 
             if np.any(s_occ[s_st_ind:s_end_ind]):
                 # There is a portion of our braking distance which is occupied.
@@ -198,22 +181,34 @@ class LaneIntervalManager:
                 return False
 
         def get_free_interval_about(s, s_occ):
-            import pdb; pdb.set_trace()
             if s < 0 or s > self.s_lane[-1]:
                 raise ValueError(f"Invalid value s out of lane bounds: {s} in interval [0, {self.s_lane[-1]}")
 
             s_idx = np.argmin(np.abs(self.s_lane - s))
 
+            # Identify the start of the interval containing s_idx.
             s_inv_st = s_idx
-            while not s_occ[s_inv_st] and s_inv_st >= 0:
+            while not s_occ[s_inv_st] and s_inv_st > 0:
                 s_inv_st = s_inv_st - 1
 
-            s_inv_st = min(s_inv_st+self.obs_buff, len(self.s_lane) - 0)
+            # If the interval starts at a non-zero entry, that means we have something behind us.
+            # Add a buffer for safety.
+            if s_inv_st == 0:
+                pass
+            else:
+                s_inv_st = min(s_inv_st+self.obs_buff, len(self.s_lane) - 1)
 
+            # Identify the end of the interval containing s_idx.
             s_inv_end = s_idx
-            while not s_occ[s_inv_end] and s_inv_end < len(self.s_lane):
+            while not s_occ[s_inv_end] and s_inv_end < len(self.s_lane) - 1:
                 s_inv_end = s_inv_end + 1
-            s_inv_end = max(s_inv_end-self.obs_buff, 0)
+
+            # If the interval ends before the last entry, we have something in front of us.
+            # Add a buffer for safety.
+            if s_inv_end == len(self.s_lane) -1:
+                pass
+            else:
+                s_inv_end = max(s_inv_end-self.obs_buff, 0)
 
             if s_inv_st > s_inv_end:
                 # Infeasible interval, return an empty one.
@@ -223,42 +218,55 @@ class LaneIntervalManager:
             return s_inv_st, s_inv_end
 
 
-        def get_acceleration(v_curr, v_des, k_v = 0.2):
-            import pdb; pdb.set_trace()
+        def get_acceleration(v_curr, k_v = 0.5):
             return np.clip(-k_v * (v_curr - v_des), self.A_MIN, self.A_MAX)
 
+
+        # Fill in the intervals for the EV over time with greedy approach on accel input.
+        # Basically, proceed to track v_des while there is no braking threat.
+        # Once a braking threat is identified, decelerate with self.A_MIN.
         s_ind_lb = []
         s_ind_ub = []
-
-        # fill in this interval using a greedy appraoch.
-        n_steps = len(s_occupied)
-
+        n_steps = len(s_occupied_intervals)
         s_curr = s0
         v_curr = v0
-
         is_stopped = False
-        for t, s_occ in enumerate(s_occupied):
-            import pdb; pdb.set_trace()
-            # Determine if we need to come to a stop.
+
+        for t, s_occ in enumerate(s_occupied_intervals):
+
             if is_stopped or should_brake(s_curr, v_curr, s_occ):
                 is_stopped = True
-                s_curr_idx = np.argmin(np.abs(self.s_lane - s_curr))
-                s_ind_lb.append(s_curr_idx - self.obs_buff)
-                s_ind_ub.append(s_curr_idx + self.obs_buff)
+                a_curr = self.A_MIN
             else:
-                s_curr = s_curr + v_curr * self.dt_mpc
-                v_curr = v_curr + get_acceleration(v_curr, v_des) * self.dt_mpc
+                a_curr = get_acceleration(v_curr)
 
-                s_inv_st, s_inv_end = get_free_interval_about(s_curr, s_occ)
+            s_curr = s_curr + v_curr*self.dt_mpc
+            v_curr = v_curr + a_curr*self.dt_mpc
 
-                if s_inv_st != s_inv_end:
-                    s_ind_lb.append(s_inv_st)
-                    s_ind_ub.append(s_inv_end)
-                else:
-                    is_stopped = True
-                    s_ind_lb.append(s_inv_st - self.obs_buff)
-                    s_ind_lb.append(s_inv_st + self.obs_buff)
+            s_curr = min(s_curr, self.s_lane[-1]) # stay within lane length
+            v_curr = max(0., v_curr)              # don't move in reverse
 
-        s_lb = [self.s_lane[i] for ind in s_ind_lb]
-        s_ub = [self.s_lane[i] for ind in s_ind_ub]
+            # Identify the smallest free interval containing s_curr.
+            # If it's empty, then return a small interval about s_curr
+            # that encloses the EV geometry as the least-harmful solution.
+            s_inv_st, s_inv_end = get_free_interval_about(s_curr, s_occ)
+            if s_inv_st != s_inv_end:
+                # Nonempty interval -> nominal case.
+                pass
+            else:
+                # Empty interval -> give the least-bad solution.
+                # We should stop since we detected an infeasible interval.
+                is_stopped = True
+                s_inv_mid = np.argmin(np.abs(self.s_lane - s_curr))
+                s_inv_st  = max(0, s_inv_mid - self.obs_buff)
+                s_inv_end = min(len(self.s_lane) - 1, s_inv_mid + self.obs_buff)
+
+            assert s_inv_st < s_inv_end
+
+            s_ind_lb.append(s_inv_st)
+            s_ind_ub.append(s_inv_end)
+
+        s_lb = [self.s_lane[ind] for ind in s_ind_lb]
+        s_ub = [self.s_lane[ind] for ind in s_ind_ub]
+
         return s_lb, s_ub

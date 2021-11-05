@@ -78,7 +78,7 @@ class DynamicAgent(ABC):
         return state_dict
 
     def update_completion(self, s):
-        if self.goal_reached or self._frenet_traj.reached_trajectory_end(s, resolution=5.):
+        if self.goal_reached or self._frenet_traj.reached_trajectory_end(s, resolution=20.):
             # Stop if the end of the path is reached and signal completion.
             self.goal_reached = True
 

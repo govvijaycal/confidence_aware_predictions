@@ -19,7 +19,7 @@ def run_without_tvs(scenario_dict, ego_init_dict, savedir):
             continue
         elif vp_dict["role"] == "ego":
             vp_dict.update(ego_init_dict)
-            vp_dict["policy_config"] = {} # TODO: FIX ME!
+            vp_dict["policy_config"] = {"is_adaptive" : True, "conf_thresh_init" : 3.22}
             vehicles_params_list.append( VehicleParams(**vp_dict) )
         else:
             raise ValueError(f"Invalid vehicle role: {vp_dict['role']}")
@@ -31,6 +31,11 @@ def run_without_tvs(scenario_dict, ego_init_dict, savedir):
                                      savedir)
     runner.run_scenario()
 
+# POLICY CONFIG FOR TV
+# "is_rational" -> True or False
+# POLICY CONFIG FOR EV
+# "conf_thresh_init" -> float > 0
+# "is_adaptive" -> True or False
 
 def run_with_tvs(scenario_dict, ego_init_dict, ego_policy_config, savedir):
     carla_params     = CarlaParams(**scenario_dict["carla_params"])
@@ -50,8 +55,7 @@ def run_with_tvs(scenario_dict, ego_init_dict, ego_policy_config, savedir):
             vehicles_params_list.append( VehicleParams(**vp_dict) )
         elif vp_dict["role"] == "ego":
             vp_dict.update(ego_init_dict)
-            # TODO: add custom ego params.
-            vp_dict["policy_config"] = {}
+            vp_dict["policy_config"] = {"is_adaptive" : True, "conf_thresh_init" : 3.22}
             vehicles_params_list.append( VehicleParams(**vp_dict) )
         else:
             raise ValueError(f"Invalid vehicle role: {vp_dict['role']}")
@@ -91,14 +95,12 @@ if __name__ == '__main__':
             ego_init_name = ego_init.split(".json")[0]
 
             # Run first without any target vehicles.
-            #savedir = os.path.join( results_folder, f"{scenario_name}_{ego_init_name}_notv")
-            #run_without_tvs(scenario_dict, ego_init_dict, savedir)
+            savedir = os.path.join( results_folder, f"{scenario_name}_{ego_init_name}_notv")
+            run_without_tvs(scenario_dict, ego_init_dict, savedir)
 
 
-            # Run all ego policy options with target vehicles.
-            for ego_policy_config in [None]: #TODO: update this.
-              savedir = os.path.join( results_folder,
-                                      f"{scenario_name}_{ego_init_name}_{ego_policy_config}")
-              run_with_tvs(scenario_dict, ego_init_dict, ego_policy_config, savedir)
-
-        break
+            # # Run all ego policy options with target vehicles.
+            # for ego_policy_config in [None]: #TODO: update this.
+            #   savedir = os.path.join( results_folder,
+            #                           f"{scenario_name}_{ego_init_name}_{ego_policy_config}")
+            #   run_with_tvs(scenario_dict, ego_init_dict, ego_policy_config, savedir)

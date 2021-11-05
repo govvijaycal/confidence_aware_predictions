@@ -1,6 +1,10 @@
-# TODO: edit this description.
-# Frenet Nonlinear Kinematic MPC Module.
-# Currently only supports a fixed velocity setpoint (initial value of v_ref).
+"""
+Frenet Nonlinear Kinematic MPC Module.
+  Follows a specified reference speed (self.v_ref)
+  subject to actuation constraints (with allowable emergency braking)
+  while trying (with softened constraints) to remain
+  within lane bounds (e_y) and safe intervals (s).
+"""
 
 import time
 import casadi
@@ -26,8 +30,8 @@ class LanekeepingMPC:
 		         EY_MAX     =  1.0,
 		         V_MIN      =  0.0,          # min/max speed (m/s)
 		         V_MAX      = 20.0,
-				 Q = [0., 1., 10., 0.1],     # weights on s, ey, epsi, v
-				 R = [10., 100.]):          # input rate weights on ax, df
+				 Q = [0., 1., 100., 0.1],     # weights on s, ey, epsi, v
+				 R = [10., 1000.]):          # input rate weights on ax, df
 
 		for key in list(locals()):
 			if key == 'self':
@@ -133,13 +137,13 @@ class LanekeepingMPC:
 		self.opti.subject_to( self.opti.bounded(self.DF_MIN, self.df_dv,  self.DF_MAX) )
 
 		# Input Rate Bound Constraints
-		self.opti.subject_to( self.opti.bounded( self.A_DOT_MIN*self.DT - self.slack_decel_jerk,
+		self.opti.subject_to( self.opti.bounded( self.A_DOT_MIN*self.DT_CTRL - self.slack_decel_jerk,
 			                                     self.acc_dv[0] - self.u_prev[0],
-			                                     self.A_DOT_MAX*self.DT) )
+			                                     self.A_DOT_MAX*self.DT_CTRL) )
 
-		self.opti.subject_to( self.opti.bounded( self.DF_DOT_MIN*self.DT,
+		self.opti.subject_to( self.opti.bounded( self.DF_DOT_MIN*self.DT_CTRL,
 			                                     self.df_dv[0] - self.u_prev[1],
-			                                     self.DF_DOT_MAX*self.DT) )
+			                                     self.DF_DOT_MAX*self.DT_CTRL) )
 
 		for i in range(self.N - 1):
 			self.opti.subject_to( self.opti.bounded( self.A_DOT_MIN*self.DT,
@@ -170,8 +174,8 @@ class LanekeepingMPC:
 		for i in range(self.N - 1):
 			cost += self._quad_form(self.u_dv[i+1, :] - self.u_dv[i,:], self.R)
 
-		cost += (100  * self.slack_decel_jerk)
-		cost += (1000 * self.slack_ey)
+		cost += (1e3  * self.slack_decel_jerk)
+		cost += (1e3  * self.slack_ey)
 		cost += (1e6  * self.slack_s)
 
 		self.opti.minimize( cost )
@@ -183,17 +187,11 @@ class LanekeepingMPC:
 			# Optimal solution.
 			u_mpc    = sol.value(self.u_dv)
 			z_mpc    = sol.value(self.z_dv)
-			#sl_mpc   = sol.value(self.sl_ay_dv)
-			#curv_ref = sol.value(self.curv_ref)
-			#v_ref    = sol.value(self.v_ref)
 			is_opt = True
 		except:
 			# Suboptimal solution (e.g. timed out).
 			u_mpc    = self.opti.debug.value(self.u_dv)
 			z_mpc    = self.opti.debug.value(self.z_dv)
-			#sl_mpc   = self.opti.debug.value(self.sl_ay_dv)
-			#curv_ref = self.opti.debug.value(self.curv_ref)
-			#v_ref    = self.opti.debug.value(self.v_ref)
 			is_opt   = False
 
 		solve_time = time.time() - st
@@ -204,6 +202,10 @@ class LanekeepingMPC:
 		sol_dict['solve_time']   = solve_time      # how long the solver took in seconds
 		sol_dict['u_mpc']        = u_mpc           # solution inputs (N by 2, see self.u_dv above)
 		sol_dict['z_mpc']        = z_mpc           # solution states (N+1 by 4, see self.z_dv above)
+
+		# NOTE: the notion of is_opt is a bit fuzzy here since we are dealing with soft constraints.
+		# It could be compared with the hard constraints by checking the slack variables.
+		# For now, this will be ignored -> focus will be on the ensuing motion rather than optimality/feasibility.
 
 		return sol_dict
 

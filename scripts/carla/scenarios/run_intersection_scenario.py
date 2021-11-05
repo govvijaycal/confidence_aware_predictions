@@ -136,12 +136,9 @@ def get_vehicle_policy(vehicle_params, vehicle_actor, goal_transform, simulation
                                   lat_accel_max=2.0,
                                   is_rational = vehicle_params.policy_config["is_rational"])
     elif vehicle_params.policy_type == "lk_mpc":
-        # TODO: use the vehicle_params.policy_config to select out a conf threshold strategy.
-        # TODO: fix # of modes and confidence params.
-        conf_params_dict = {"n_gmm_modes" : vehicle_params.N_modes,
-                            "n_steps_sliding_window" : int(1.0/simulation_dt),
-                            "is_adaptive" : False}
-
+        conf_params_dict = {"n_buffer_size"    : int(1.0/vehicle_params.dt_mpc),
+                            "conf_thresh_init" : vehicle_params.policy_config["conf_thresh_init"],
+                            "is_adaptive"      : vehicle_params.policy_config["is_adaptive"]}
         return LanekeepingMPCAgent(vehicle_actor, goal_transform.location, \
                                    conf_params_dict,
                                    N=vehicle_params.N_mpc,
@@ -290,7 +287,8 @@ class RunIntersectionScenario:
                                       "state_trajectory" : [],
                                       "input_trajectory" : [],
                                       "feasibility"      : [],
-                                      "solve_times"      : []}
+                                      "solve_times"      : [],
+                                      "conf_threshs"     : []}
 
         try:
             with CarlaSyncMode(self.world, self.drone, fps=self.carla_fps) as sync_mode:
@@ -320,9 +318,9 @@ class RunIntersectionScenario:
 
                     for idx_act, (act, policy) in enumerate(zip(self.vehicle_actors, self.vehicle_policies)):
                         control, z0, u0, is_feasible, solve_time = policy.run_step(pred_dict)
+                        act_key = f"{act.attributes['role_name']}_{idx_act}"
                         if not policy.done():
                             z0 = np.append(t_elapsed, z0) # add the Carla timestamp
-                            act_key = f"{act.attributes['role_name']}_{idx_act}"
                             self.results_dict[act_key]["state_trajectory"].append(z0)
                             self.results_dict[act_key]["input_trajectory"].append(u0)
                             self.results_dict[act_key]["feasibility"].append(is_feasible)
@@ -334,9 +332,17 @@ class RunIntersectionScenario:
 
                         if idx_act == self.ego_vehicle_idx:
                             # Keep track of ego's information for rendering.
-                            ego_vel   = act.get_velocity()
-                            ego_speed = np.linalg.norm([ego_vel.x, ego_vel.y])
-                            ego_ctrl  = control
+                            ego_vel         = act.get_velocity()
+                            ego_speed       = np.linalg.norm([ego_vel.x, ego_vel.y])
+                            ego_ctrl        = control
+                            try:
+                                ego_conf_thresh = policy.confidence_thresh_manager.conf_thresh
+                            except:
+                                ego_conf_thresh = 5.991 # 95% confidence level (default)
+
+                            self.results_dict[act_key]["conf_threshs"].append(ego_conf_thresh)
+                        else:
+                            self.results_dict[act_key]["conf_threshs"].append(np.nan)
 
                     # Get drone camera image.
                     img_drone = np.frombuffer(img.raw_data, dtype=np.uint8)
@@ -366,7 +372,7 @@ class RunIntersectionScenario:
                         if pred_dict["tvs_valid_pred"][0]:
                             mus    = pred_dict["tvs_mode_dists"][0][0]
                             sigmas = pred_dict["tvs_mode_dists"][1][0]
-                            self._viz_gmm(img_drone, mus, sigmas)
+                            self._viz_gmm(img_drone, mus, sigmas, mdist_sq_thresh=ego_conf_thresh)
 
                     if self.viz_params.overlay_traj_hist:
                         self._viz_traj_hist(img_drone)
@@ -379,7 +385,6 @@ class RunIntersectionScenario:
                             for prob_idx, mode_prob in enumerate(pred_dict["tvs_mode_probs"][0]):
                                 cv2.putText(img_drone, f"{mode_prob:.3f}",
                                             (360 + prob_idx * 100, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, self.mode_rgb_colors[prob_idx], 2)
-
 
                     # Handle visualization / saving to video.
                     if self.viz_params.visualize_opencv:
@@ -397,7 +402,8 @@ class RunIntersectionScenario:
                     for arr_key in ["state_trajectory",
                                     "input_trajectory",
                                     "feasibility",
-                                    "solve_times"]:
+                                    "solve_times",
+                                    "conf_threshs"]:
                         self.results_dict[act_key][arr_key] = np.array(self.results_dict[act_key][arr_key])
                 pkl_name = os.path.join(self.savedir, "scenario_result.pkl")
                 pickle.dump(self.results_dict, open(pkl_name, "wb"))
@@ -432,7 +438,7 @@ class RunIntersectionScenario:
                              [ GMM covar prediction for vehicle i, np.ndarray with size (ego_num_modes, ego_N, 2, 2) ]_{i=1}^{N_TV}
                            ]
           tvs_valid_pred : [ Flag indicating if vehicle i's prediction are real or spoofed, bool ]_{i=1}^{N_TV}
-          tv_dimensions  : [ Dict containing vehicle geometry parameters ]_{i=1}^{N_TV}
+          tvs_dimensions  : [ Dict containing vehicle geometry parameters ]_{i=1}^{N_TV}
         """
         if len(self.tv_vehicle_idxs) == 0:
             # No TVs in the scene so we make a fake constant pose prediction that is over a km away from the EV.
@@ -440,10 +446,12 @@ class RunIntersectionScenario:
             ego_x, ego_y = ego_location.x, -ego_location.y
             curr_target_vehicle_pose = np.array([1000 + ego_x, 1000 + ego_y, 0.])
             tvs_poses = [curr_target_vehicle_pose]
+            tvs_traj_hists = np.stack([curr_target_vehicle_pose[:2]]*5)
             tvs_mode_probs = [ np.ones(self.ego_num_modes) / self.ego_num_modes ]
             tvs_mode_dists = [[np.stack([[curr_target_vehicle_pose[:2]]*self.ego_N]*self.ego_num_modes)],
                               [np.stack([[np.identity(2)]*self.ego_N]*self.ego_num_modes)]]
             tvs_valid_pred = [False]
+            tvs_dimensions = [{}]
         else:
             # TODO: clean up and generalize this to many target vehicles.
             target_agent_id = self.vehicle_actors[self.tv_vehicle_idxs[0]].id
@@ -455,6 +463,11 @@ class RunIntersectionScenario:
             curr_target_vehicle_pose     = np.append(curr_target_vehicle_position, curr_target_vehicle_yaw)
             tvs_poses = [curr_target_vehicle_pose]
 
+            # TODO: clean up, basic idea is to get states at t-4, ..., t in the world frame.
+            hist_tv_positions = R_target_to_world @ past_states_tv[-5:, 1:3].T + t_target_to_world.reshape(2, 1)
+            hist_tv_positions = hist_tv_positions.T
+            tvs_traj_hists = [hist_tv_positions]
+
             if np.any(np.isnan(past_states_tv)):
                 # Not enough data for predictions to be made.
                 # We just return a constant pose GMM until we can extrapolate.
@@ -462,7 +475,7 @@ class RunIntersectionScenario:
                 tvs_mode_dists = [[np.stack([[curr_target_vehicle_position]*self.ego_N]*self.ego_num_modes)],
                                   [np.stack([[0.1*np.identity(2)]*self.ego_N]*self.ego_num_modes)]]
                 tvs_valid_pred = [False]
-                tv_dimensions = [{}]
+                tvs_dimensions = [{}]
 
             else:
                 # Nominal case: query the prediction model and parse GMM preds, truncating to self.ego_num_modes
@@ -492,13 +505,14 @@ class RunIntersectionScenario:
                 tvs_mode_probs = [gmm_pred_tv.mode_probabilities]
                 tvs_mode_dists = [[gmm_pred_tv.mus[:, :self.ego_N, :]], [gmm_pred_tv.sigmas[:, :self.ego_N, :, :]]]
                 tvs_valid_pred = [True]
-                tv_dimensions = [vehicle_name_to_dimensions(self.vehicle_actors[self.tv_vehicle_idxs[0]].type_id)]
+                tvs_dimensions = [vehicle_name_to_dimensions(self.vehicle_actors[self.tv_vehicle_idxs[0]].type_id)]
 
-        pred_dict = {"tvs_poses"      : tvs_poses,
-                     "tvs_mode_probs" : tvs_mode_probs,
-                     "tvs_mode_dists" : tvs_mode_dists,
-                     "tvs_valid_pred" : tvs_valid_pred,
-                     "tvs_dimensions" : tvs_dimensions}
+        pred_dict = {"tvs_poses"          : tvs_poses,
+                     "tvs_traj_hists"     : tvs_traj_hists,
+                     "tvs_mode_probs"     : tvs_mode_probs,
+                     "tvs_mode_dists"     : tvs_mode_dists,
+                     "tvs_valid_pred"     : tvs_valid_pred,
+                     "tvs_dimensions"     : tvs_dimensions}
 
         return pred_dict
 
