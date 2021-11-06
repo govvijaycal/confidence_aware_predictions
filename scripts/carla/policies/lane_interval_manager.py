@@ -102,8 +102,8 @@ class LaneIntervalManager:
         # as well as the TV vehicle's dimensions.  This is done by a Minkowski sum, where we assume the vehicle's shape is oriented
         # by the mean trajectory pose.
 
-        tv_length = tv_dims["length"]
-        tv_width  = tv_dims["width"]
+        tv_length = tv_dims["length"] + 1.
+        tv_width  = tv_dims["width"]  + 0.5
         tv_shape_polytope = pytope.Polytope(lb=(-tv_length/2., -tv_width/2.),
                                             ub=( tv_length/2.,  tv_width/2.))
 
@@ -151,6 +151,9 @@ class LaneIntervalManager:
                 s_occupied = np.logical_or(s_occupied,
                                            polytope_containment(A, b, self.right_lane_boundary))
 
+            if len(s_occupied_intervals) > 0:
+                s_occupied = np.logical_or(s_occupied, s_occupied_intervals[-1])
+
             s_occupied_intervals.append(s_occupied)
 
         return s_occupied_intervals
@@ -164,7 +167,9 @@ class LaneIntervalManager:
                 raise ValueError(f"Invalid value s out of lane bounds: {s} in interval [0, {self.s_lane[-1]}")
 
             # Compute braking distance and determine where we'd stop.
-            s_stopped = s +  v**2 / (2. * abs(self.A_MIN))
+            # https://traffic-simulation.de/info/info_IDM.html
+            A_CMFT = self.A_MIN / 2.0
+            s_stopped = s +  v**2 / (2. * abs(A_CMFT)) + 5.0 + 2.0 * v
 
             # Consider the region within the braking distance. We care about front collisions
             # and assume that rear collisions are not our responsibility.

@@ -48,7 +48,7 @@ class LanekeepingPIAgent(DynamicAgent):
             self.k_ey = 0.5                # ey proportional gain, rad/m
             self.x_LA = 5.0                # lookahead distance, m
             self.curv_delay = 2            # number of timesteps delay in curvature measurement / speed setpoint
-            self.ey_noise_magnitude = 1.5  # amplitude of lateral error sinusoidal noise
+            self.ey_noise_magnitude = 1.8  # amplitude of lateral error sinusoidal noise
             self.v_noise_magnitude  = 2.0  # amplitude of speed setpoint sinusoidal noise
             self.n_calls = 0.              # current timestep % period
             self.n_calls_period = 80       # period for sinusoidal noise

@@ -26,11 +26,13 @@ class LanekeepingMPC:
 		         A_DOT_MAX  =  1.5,
 		         DF_DOT_MIN = -0.5,          # min/max front steer angle rate constraint (rad/s)
 		         DF_DOT_MAX =  0.5,
-		         EY_MIN     = -1.0,          # min/max lateral error (m)
-		         EY_MAX     =  1.0,
+		         EY_MIN     = -0.8,          # min/max lateral error (m)
+		         EY_MAX     =  0.8,
+		         EPSI_MIN   = -0.75,
+		         EPSI_MAX   =  0.75,
 		         V_MIN      =  0.0,          # min/max speed (m/s)
 		         V_MAX      = 20.0,
-				 Q = [0., 1., 10., 0.1],     # weights on s, ey, epsi, v
+				 Q = [0., 1., 200., 0.1],     # weights on s, ey, epsi, v
 				 R = [10., 1000.]):          # input rate weights on ax, df
 
 		for key in list(locals()):
@@ -82,10 +84,12 @@ class LanekeepingMPC:
 		self.acc_dv = self.u_dv[:,0]
 		self.df_dv  = self.u_dv[:,1]
 
-		self.slacks           = self.opti.variable(3)
+		self.slacks           = self.opti.variable(5)
 		self.slack_ey         = self.slacks[0]
-		self.slack_decel_jerk = self.slacks[1]
-		self.slack_s          = self.slacks[2]
+		self.slack_epsi       = self.slacks[1]
+		self.slack_decel_jerk = self.slacks[2]
+		self.slack_s          = self.slacks[3]
+		self.slack_slew_rate  = self.slacks[4]
 
 		'''
 		(3) Problem Setup: Constraints, Cost, Initial Solve
@@ -112,6 +116,7 @@ class LanekeepingMPC:
 	def _add_constraints(self):
 		## State Bound Constraints
 		self.opti.subject_to( self.opti.bounded(self.EY_MIN - self.slack_ey, self.ey_dv, self.EY_MAX + self.slack_ey) )
+		self.opti.subject_to( self.opti.bounded(self.EPSI_MIN - self.slack_epsi, self.epsi_dv, self.EPSI_MAX + self.slack_epsi))
 		self.opti.subject_to( self.opti.bounded( self.V_MIN,  self.v_dv, self.V_MAX) )
 
 		## Initial State Constraint
@@ -141,9 +146,9 @@ class LanekeepingMPC:
 			                                     self.acc_dv[0] - self.u_prev[0],
 			                                     self.A_DOT_MAX*self.DT_CTRL) )
 
-		self.opti.subject_to( self.opti.bounded( self.DF_DOT_MIN*self.DT_CTRL,
+		self.opti.subject_to( self.opti.bounded( self.DF_DOT_MIN*self.DT_CTRL - self.slack_slew_rate,
 			                                     self.df_dv[0] - self.u_prev[1],
-			                                     self.DF_DOT_MAX*self.DT_CTRL) )
+			                                     self.DF_DOT_MAX*self.DT_CTRL + self.slack_slew_rate) )
 
 		for i in range(self.N - 1):
 			self.opti.subject_to( self.opti.bounded( self.A_DOT_MIN*self.DT,
@@ -174,9 +179,11 @@ class LanekeepingMPC:
 		for i in range(self.N - 1):
 			cost += self._quad_form(self.u_dv[i+1, :] - self.u_dv[i,:], self.R)
 
-		cost += (1e3  * self.slack_decel_jerk)
-		cost += (1e3  * self.slack_ey)
-		cost += (1e6  * self.slack_s)
+		cost += (1e2  * self.slack_decel_jerk)
+		cost += (1e3  * self.slack_slew_rate)
+		cost += (1e6  * self.slack_ey)
+		cost += (1e9  * self.slack_epsi)
+		cost += (1e3  * self.slack_s)
 
 		self.opti.minimize( cost )
 

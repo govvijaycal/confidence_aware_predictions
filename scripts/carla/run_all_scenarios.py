@@ -19,7 +19,8 @@ def run_without_tvs(scenario_dict, ego_init_dict, savedir):
             continue
         elif vp_dict["role"] == "ego":
             vp_dict.update(ego_init_dict)
-            vp_dict["policy_config"] = {"is_adaptive" : True, "conf_thresh_init" : 3.22}
+            # Note: here, confidence params don't matter practically but included for policy construction.
+            vp_dict["policy_config"] = {"is_adaptive" : False, "conf_thresh_init" : 3.22}
             vehicles_params_list.append( VehicleParams(**vp_dict) )
         else:
             raise ValueError(f"Invalid vehicle role: {vp_dict['role']}")
@@ -31,18 +32,10 @@ def run_without_tvs(scenario_dict, ego_init_dict, savedir):
                                      savedir)
     runner.run_scenario()
 
-# POLICY CONFIG FOR TV
-# "is_rational" -> True or False
-# POLICY CONFIG FOR EV
-# "conf_thresh_init" -> float > 0
-# "is_adaptive" -> True or False
-
-def run_with_tvs(scenario_dict, ego_init_dict, ego_policy_config, savedir):
+def run_with_tvs(scenario_dict, ego_init_dict, ego_policy_config, tv_policy_config, savedir):
     carla_params     = CarlaParams(**scenario_dict["carla_params"])
     drone_viz_params = DroneVizParams(**scenario_dict["drone_viz_params"])
     pred_params      = PredictionParams()
-
-    # TODO: ID the randomization factors here for both the TV and EV.
 
     vehicles_params_list = []
 
@@ -51,11 +44,11 @@ def run_with_tvs(scenario_dict, ego_init_dict, ego_policy_config, savedir):
             vp_dict["policy_config"] = {}
             vehicles_params_list.append( VehicleParams(**vp_dict) )
         elif vp_dict["role"] == "target":
-            vp_dict["policy_config"] = {"is_rational": False} # TODO: hack, fix this.
+            vp_dict["policy_config"] = tv_policy_config
             vehicles_params_list.append( VehicleParams(**vp_dict) )
         elif vp_dict["role"] == "ego":
             vp_dict.update(ego_init_dict)
-            vp_dict["policy_config"] = {"is_adaptive" : True, "conf_thresh_init" : 3.22}
+            vp_dict["policy_config"] = ego_policy_config
             vehicles_params_list.append( VehicleParams(**vp_dict) )
         else:
             raise ValueError(f"Invalid vehicle role: {vp_dict['role']}")
@@ -67,16 +60,14 @@ def run_with_tvs(scenario_dict, ego_init_dict, ego_policy_config, savedir):
                                      savedir)
     runner.run_scenario()
 
-
 if __name__ == '__main__':
     TOWN_NUM = 7 # 5 or 7
 
-    if TOWN_NUM == 5:
-        scenes_to_evaluate = [1, 2, 3]
-        town_suffix = ""
-    elif TOWN_NUM == 7:
-        scenes_to_evaluate = [1, 2, 3, 4]
+    if TOWN_NUM == 7:
+        scenes_to_evaluate = [5]
         town_suffix = "_t7"
+    else:
+        raise NotImplementedError("Only Town7 currently implemented.")
 
     scenario_folder = os.path.join( os.path.dirname( os.path.abspath(__file__)  ), "scenarios/" )
     scenarios_list = [f"{scenario_folder}scenario_{scene_num:02}{town_suffix}.json" for scene_num in scenes_to_evaluate]
@@ -99,8 +90,25 @@ if __name__ == '__main__':
             run_without_tvs(scenario_dict, ego_init_dict, savedir)
 
 
-            # # Run all ego policy options with target vehicles.
-            # for ego_policy_config in [None]: #TODO: update this.
-            #   savedir = os.path.join( results_folder,
-            #                           f"{scenario_name}_{ego_init_name}_{ego_policy_config}")
-            #   run_with_tvs(scenario_dict, ego_init_dict, ego_policy_config, savedir)
+            # Run all ego policy options with target vehicles.
+            for ego_conf_policy in ["low", "adaptive", "high"]:
+                for tv_rat_policy in ["irrational", "rational"]:
+
+                    if ego_conf_policy == "low":
+                        ego_policy_config = {"is_adaptive" : False, "conf_thresh_init" : 0.211} # 10% confidence level
+                    elif ego_conf_policy == "high":
+                        ego_policy_config = {"is_adaptive" : False, "conf_thresh_init" : 9.210} # 99% confidence level
+                    elif ego_conf_policy == "adaptive":
+                        ego_policy_config = {"is_adaptive" : True,  "conf_thresh_init" : 3.220} # start at 80% confidence level
+                    else:
+                        raise ValueError(f"Invalid EV policy choice: {ego_conf_policy}")
+
+                    if tv_rat_policy == "irrational":
+                        tv_policy_config = {"is_rational" : False}
+                    elif tv_rat_policy == "rational":
+                        tv_policy_config = {"is_rational" : True}
+                    else:
+                        raise ValueError(f"Invalid TV policy choice: {tv_rat_policy}")
+
+                    savedir = os.path.join( results_folder, f"{scenario_name}_{ego_init_name}_{ego_conf_policy}_{tv_rat_policy}")
+                    run_with_tvs(scenario_dict, ego_init_dict, ego_policy_config, tv_policy_config, savedir)

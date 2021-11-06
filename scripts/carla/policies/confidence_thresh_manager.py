@@ -8,8 +8,8 @@ class ConfidenceThreshManager:
                  is_adaptive,
                  conf_thresh_init,
                  conf_thresh_min  = 0.211,
-                 conf_thresh_max  = 13.8,
-                 alpha=0.8):
+                 conf_thresh_max  = 9.210,
+                 alpha = 0.8):
 
         # For a 2-degree-of-freedom chi-square distribution,
         # here are critical values:
@@ -21,7 +21,6 @@ class ConfidenceThreshManager:
         # 0.90 -> 4.61
         # 0.95 -> 5.99
         # 0.99 -> 9.21
-        # 0.999 -> 13.8
 
         # Assumption is that the user properly chooses when to update.
         # It should be at the time discretization of the prediction/MPC model.
@@ -30,6 +29,7 @@ class ConfidenceThreshManager:
         # trajectory since that timestep n_buffer_size updates ago.
 
         self.pred_buffer     = deque(maxlen=n_buffer_size)
+        self.thresh_buffer   = deque(maxlen=n_buffer_size)
         self.is_adaptive     = is_adaptive
         self.conf_thresh_min = conf_thresh_min
         self.conf_thresh_max = conf_thresh_max
@@ -87,9 +87,11 @@ class ConfidenceThreshManager:
                         smallest_mdist_sq_per_timestep[tm_step] = min(smallest_mdist_sq_per_timestep[tm_step], mdist_sq)
 
                 maxmin_mdist_sq = np.max(smallest_mdist_sq_per_timestep)
-                conf_thresh_curr = max(self.conf_thresh_min, maxmin_mdist_sq)
+                self.thresh_buffer.append(max(self.conf_thresh_min, maxmin_mdist_sq))
 
             # Low pass filter update for conf thresh.
+            conf_thresh_curr = max(self.thresh_buffer)
+
             self.conf_thresh = self.alpha * conf_thresh_curr + (1. - self.alpha) * self.conf_thresh
             self.conf_thresh = np.clip(self.conf_thresh, self.conf_thresh_min, self.conf_thresh_max )
 

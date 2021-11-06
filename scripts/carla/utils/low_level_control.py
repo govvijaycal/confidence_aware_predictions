@@ -58,7 +58,7 @@ class LowLevelControl:
 
             # Acceleration-related logic.
             if not np.isnan(self.v_prev):
-                k_a = 1.0 if v_curr <= 1.0 else 0.0
+                k_a = 2.0 if v_curr <= 2.0 else 0.01
                 control.throttle += k_a * (a_des - self.acc_est_lp)
 
         else:

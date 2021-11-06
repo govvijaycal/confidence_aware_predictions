@@ -24,7 +24,7 @@
 			"vehicle_type"                : "vehicle.mercedes-benz.coupe",
 			"vehicle_color"               : "186, 0, 0",
 			"policy_type"                 : "lk_pi",
-			"intersection_start_node_idx" :     3,
+			"intersection_start_node_idx" :     0,
 			"intersection_goal_node_idx"  :     3,
 			"start_left_offset"           :   0.0,
 			"goal_left_offset"            :   0.0,

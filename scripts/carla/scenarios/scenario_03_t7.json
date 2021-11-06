@@ -8,7 +8,7 @@
 	"drone_viz_params" : {
 		"x"                  : -20.0,
 		"y"                  : -160.0,
-		"visualize_opencv"   : false,
+		"visualize_opencv"   : true,
 		"save_avi"           : true,
 		"overlay_gmm"        : true,
 		"overlay_ego_info"   : true,
@@ -28,8 +28,8 @@
 			"intersection_goal_node_idx"  :     1,
 			"start_left_offset"           :   0.0,
 			"goal_left_offset"            :   0.0,
-			"start_longitudinal_offset"   :   0.0,
-			"goal_longitudinal_offset"    :   0.0,
+			"start_longitudinal_offset"   : -10.0,
+			"goal_longitudinal_offset"    :  10.0,
 			"nominal_speed"               :  10.0,
 			"init_speed"                  :  12.0
 		},
@@ -42,7 +42,7 @@
 			"intersection_goal_node_idx"  :    1,
 			"start_left_offset"           :  0.0,
 			"goal_left_offset"            :  0.0,
-			"goal_longitudinal_offset"    :  0.0,
+			"goal_longitudinal_offset"    : 10.0,
 			"nominal_speed"               : 10.0
 		}
 	]
