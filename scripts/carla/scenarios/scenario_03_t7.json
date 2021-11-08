@@ -16,7 +16,7 @@
 		"overlay_traj_hist"  : true
 	},
 	"ego_init_jsons" : [
-		"ego_init_03.json"
+		"ego_init_00.json"
 	],
 	"vehicle_params" : [
 		{
@@ -28,7 +28,7 @@
 			"intersection_goal_node_idx"  :     3,
 			"start_left_offset"           :   0.0,
 			"goal_left_offset"            :   0.0,
-			"start_longitudinal_offset"   : -25.0,
+			"start_longitudinal_offset"   : -18.0,
 			"goal_longitudinal_offset"    :  20.0,
 			"nominal_speed"               :  10.0,
 			"init_speed"                  :  12.0
