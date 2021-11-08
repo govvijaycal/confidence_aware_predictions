@@ -64,7 +64,7 @@ if __name__ == '__main__':
     TOWN_NUM = 7 # 5 or 7
 
     if TOWN_NUM == 7:
-        scenes_to_evaluate = [5]
+        scenes_to_evaluate = [1, 2, 3]
         town_suffix = "_t7"
     else:
         raise NotImplementedError("Only Town7 currently implemented.")
@@ -89,11 +89,9 @@ if __name__ == '__main__':
             savedir = os.path.join( results_folder, f"{scenario_name}_{ego_init_name}_notv")
             run_without_tvs(scenario_dict, ego_init_dict, savedir)
 
-
             # Run all ego policy options with target vehicles.
             for ego_conf_policy in ["low", "adaptive", "high"]:
                 for tv_rat_policy in ["irrational", "rational"]:
-
                     if ego_conf_policy == "low":
                         ego_policy_config = {"is_adaptive" : False, "conf_thresh_init" : 0.211} # 10% confidence level
                     elif ego_conf_policy == "high":

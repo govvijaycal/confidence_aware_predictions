@@ -32,7 +32,7 @@ class LanekeepingMPC:
 		         EPSI_MAX   =  0.75,
 		         V_MIN      =  0.0,          # min/max speed (m/s)
 		         V_MAX      = 20.0,
-				 Q = [0., 1., 200., 0.1],     # weights on s, ey, epsi, v
+				 Q = [0., 1., 100., 0.1],     # weights on s, ey, epsi, v
 				 R = [10., 1000.]):          # input rate weights on ax, df
 
 		for key in list(locals()):
@@ -215,6 +215,25 @@ class LanekeepingMPC:
 		# For now, this will be ignored -> focus will be on the ensuing motion rather than optimality/feasibility.
 
 		return sol_dict
+
+	def get_global_trajectory(self, u_mpc, z_global_init):
+		z_global = np.ones((self.N+1, 4)) * np.nan
+		z_global[0, :] = z_global_init
+
+		for ind, u in enumerate(u_mpc):
+			x, y, p, v = z_global[ind, :]
+			u_acc, u_df = u
+
+			beta = np.arctan( self.L_R / (self.L_F + self.L_R) * np.tan(u_df) )
+
+			xn = x + self.DT * (v * np.cos(p + beta))
+			yn = y + self.DT * (v * np.sin(p + beta))
+			pn = p + self.DT * (v / self.L_R * np.sin(beta))
+			vn = v + self.DT * (u_acc)
+
+			z_global[ind+1, :] = [xn, yn, pn, vn]
+
+		return z_global
 
 	def update(self, update_dict):
 		self._update_initial_condition(*[update_dict[key] for key in ['s', 'ey', 'epsi', 'v']])

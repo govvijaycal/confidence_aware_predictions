@@ -1,5 +1,6 @@
 import numpy as np
 import pytope
+import matplotlib.pyplot as plt
 
 class LaneIntervalManager:
     def __init__(self,
@@ -7,7 +8,7 @@ class LaneIntervalManager:
                  dt_mpc,          # time discretization for both MPC + predictions, s
                  A_MIN,           # min acceleration, m/s^2
                  A_MAX,           # max (longitudinal) acceleration, m/s^2
-                 lane_width = 3.7 # lane width used to generate lane boundaries, m
+                 lane_width = 3.5 # lane width used to generate lane boundaries, m
                  ):
 
         self.dt_mpc = dt_mpc
@@ -23,6 +24,49 @@ class LaneIntervalManager:
         self.left_lane_boundary  = self.frenet_traj_h.get_left_boundary(offset=lane_width/2.)
         self.right_lane_boundary = self.frenet_traj_h.get_right_boundary(offset=lane_width/2.)
         self.s_lane              = self.frenet_traj_h.trajectory[:,0]
+
+        # self.count = 0
+
+    def _debug_viz_sets(self, tv_conf_sets_by_mode, tv_occupancy_sets_by_mode):
+        # Visualize everything in XY space.
+        N_modes = len(tv_conf_sets_by_mode)
+        assert N_modes == len(tv_occupancy_sets_by_mode)
+        assert N_modes == 3
+
+        f = plt.figure(1)
+        for i in range(3):
+            plt.subplot(1, 3, i+1)
+            plt.plot(self.left_lane_boundary[:,0], self.left_lane_boundary[:,1], 'k')
+            plt.plot(self.right_lane_boundary[:,0], self.right_lane_boundary[:,1], 'k')
+
+
+        # tv_occupancy_sets_by_mode: N_modes by N_timesteps
+        mode_colors = ["r", "g", "b"]
+        for ind, (tv_occ_sets, color) in enumerate(zip(tv_occupancy_sets_by_mode, mode_colors)):
+            plt.subplot(1, 3, ind+1)
+            ax = plt.gca()
+            for tv_occ_set in tv_occ_sets:
+                tv_occ_set.plot(ax, facecolor=color, alpha=0.5)
+
+        # tv_conf_sets_by_mode: N_modes by N_timesteps
+        mode_colors = ["m", "y", "c"]
+        for ind, (tv_conf_sets, color) in enumerate(zip(tv_conf_sets_by_mode, mode_colors)):
+            plt.subplot(1, 3, ind+1)
+            ax = plt.gca()
+            for tv_conf_set in tv_conf_sets:
+                tv_occ_set.plot(ax, facecolor=color, alpha=0.8)
+
+            plt.axis("equal")
+
+        plt.tight_layout()
+
+    def _debug_viz_occupancies(self, s_occupied_intervals, s_lb, s_ub):
+        # Visualize things in timestep vs. s space.
+        plt.figure(2)
+
+        for t, (s_occ, s_low, s_hi) in enumerate(zip(s_occupied_intervals, s_lb, s_ub)):
+            [plt.scatter(t, self.s_lane[ind_s], marker='*') for (ind_s, occ_flag) in enumerate(s_occ) if occ_flag]
+            plt.plot([t, t], [s_low, s_hi], ls='solid', color='k', marker='x')
 
     def generate_interval_constraints(self, s0_ev, v0_ev, v_des, x0_tv, y0_tv, conf_threshs, mus, sigmas, tv_dims):
         # Check inputs.
@@ -45,9 +89,15 @@ class LaneIntervalManager:
         s_occupied_intervals       = self._get_occupied_intervals(tv_occupancy_sets_by_mode)
 
         # Find a feasible set of "interval traversals" for the EV s.t. that avoids the TV by remaining in free intervals.
-        s_lb, s_ub                 = self._find_feasible_interval_traversal(s0_ev, v0_ev, v_des, s_occupied_intervals)
+        s_lb, s_ub, tb             = self._find_feasible_interval_traversal(s0_ev, v0_ev, v_des, s_occupied_intervals)
 
-        return s_lb, s_ub
+        # if self.count % 10 == 0:
+        #     self._debug_viz_sets(tv_conf_sets_by_mode, tv_occupancy_sets_by_mode)
+        #     self._debug_viz_occupancies(s_occupied_intervals, s_lb, s_ub)
+
+        # self.count = self.count + 1
+
+        return s_lb, s_ub, tb
 
     @staticmethod
     def _get_conf_sets(conf_threshs, mus, sigmas):
@@ -102,8 +152,8 @@ class LaneIntervalManager:
         # as well as the TV vehicle's dimensions.  This is done by a Minkowski sum, where we assume the vehicle's shape is oriented
         # by the mean trajectory pose.
 
-        tv_length = tv_dims["length"] + 1.
-        tv_width  = tv_dims["width"]  + 0.5
+        tv_length = tv_dims["length"] + 0.5
+        tv_width  = tv_dims["width"]  + 0.25
         tv_shape_polytope = pytope.Polytope(lb=(-tv_length/2., -tv_width/2.),
                                             ub=( tv_length/2.,  tv_width/2.))
 
@@ -151,9 +201,6 @@ class LaneIntervalManager:
                 s_occupied = np.logical_or(s_occupied,
                                            polytope_containment(A, b, self.right_lane_boundary))
 
-            if len(s_occupied_intervals) > 0:
-                s_occupied = np.logical_or(s_occupied, s_occupied_intervals[-1])
-
             s_occupied_intervals.append(s_occupied)
 
         return s_occupied_intervals
@@ -169,7 +216,7 @@ class LaneIntervalManager:
             # Compute braking distance and determine where we'd stop.
             # https://traffic-simulation.de/info/info_IDM.html
             A_CMFT = self.A_MIN / 2.0
-            s_stopped = s +  v**2 / (2. * abs(A_CMFT)) + 5.0 + 2.0 * v
+            s_stopped = s +  v**2 / (2. * abs(A_CMFT))
 
             # Consider the region within the braking distance. We care about front collisions
             # and assume that rear collisions are not our responsibility.
@@ -235,12 +282,13 @@ class LaneIntervalManager:
         n_steps = len(s_occupied_intervals)
         s_curr = s0
         v_curr = v0
-        is_stopped = False
+        is_braking = False
+        t_brake    = np.nan
 
         for t, s_occ in enumerate(s_occupied_intervals):
 
-            if is_stopped or should_brake(s_curr, v_curr, s_occ):
-                is_stopped = True
+            if is_braking or should_brake(s_curr, v_curr, s_occ):
+                is_braking = True
                 a_curr = self.A_MIN
             else:
                 a_curr = get_acceleration(v_curr)
@@ -255,13 +303,22 @@ class LaneIntervalManager:
             # If it's empty, then return a small interval about s_curr
             # that encloses the EV geometry as the least-harmful solution.
             s_inv_st, s_inv_end = get_free_interval_about(s_curr, s_occ)
+
+            # We should restrict this interval further if we're in a braking mode.
+            # Else we may satisfy the s constraints but without coming to a full stop.
+            # We can ensure we come to a stop by restricting the interval
+            # based on our max deceleration, which is accounted for in s_curr already.
+            if is_braking:
+                s_inv_end = np.argmin(np.abs(self.s_lane - s_curr))
+                s_inv_st  = min(s_inv_st, s_inv_end)
+
             if s_inv_st != s_inv_end:
                 # Nonempty interval -> nominal case.
                 pass
             else:
                 # Empty interval -> give the least-bad solution.
                 # We should stop since we detected an infeasible interval.
-                is_stopped = True
+                is_braking = True
                 s_inv_mid = np.argmin(np.abs(self.s_lane - s_curr))
                 s_inv_st  = max(0, s_inv_mid - self.obs_buff)
                 s_inv_end = min(len(self.s_lane) - 1, s_inv_mid + self.obs_buff)
@@ -271,7 +328,10 @@ class LaneIntervalManager:
             s_ind_lb.append(s_inv_st)
             s_ind_ub.append(s_inv_end)
 
+            if is_braking and np.isnan(t_brake):
+                t_brake = t
+
         s_lb = [self.s_lane[ind] for ind in s_ind_lb]
         s_ub = [self.s_lane[ind] for ind in s_ind_ub]
 
-        return s_lb, s_ub
+        return s_lb, s_ub, t_brake

@@ -19,7 +19,7 @@ class LanekeepingPIAgent(DynamicAgent):
                  dt = 0.05,               # s, control timestep
                  is_rational = True,      # whether to use a rational/irrational driving policy
                  nominal_speed_mps = 8.0, # sets desired speed (m/s) to track
-                 lat_accel_max = 2.0):    # sets the maximum lateral acceleration (m/s^2)
+                 lat_accel_max = 3.0):    # sets the maximum lateral acceleration (m/s^2)
 
         super().__init__(vehicle=vehicle,
                          goal_location=goal_location,
@@ -46,10 +46,10 @@ class LanekeepingPIAgent(DynamicAgent):
                                                       k_i=0.01)
         else:
             self.k_ey = 0.5                # ey proportional gain, rad/m
-            self.x_LA = 5.0                # lookahead distance, m
+            self.x_LA = 7.0                # lookahead distance, m
             self.curv_delay = 2            # number of timesteps delay in curvature measurement / speed setpoint
             self.ey_noise_magnitude = 1.8  # amplitude of lateral error sinusoidal noise
-            self.v_noise_magnitude  = 2.0  # amplitude of speed setpoint sinusoidal noise
+            self.v_noise_magnitude  = 4.0  # amplitude of speed setpoint sinusoidal noise
             self.n_calls = 0.              # current timestep % period
             self.n_calls_period = 80       # period for sinusoidal noise
 

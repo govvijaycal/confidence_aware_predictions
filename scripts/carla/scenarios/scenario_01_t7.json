@@ -29,7 +29,7 @@
 			"start_left_offset"           :   0.0,
 			"goal_left_offset"            :   0.0,
 			"start_longitudinal_offset"   : -20.0,
-			"goal_longitudinal_offset"    :  10.0,
+			"goal_longitudinal_offset"    :  20.0,
 			"nominal_speed"               :  10.0,
 			"init_speed"                  :  12.0
 		},

@@ -9,7 +9,7 @@ class ConfidenceThreshManager:
                  conf_thresh_init,
                  conf_thresh_min  = 0.211,
                  conf_thresh_max  = 9.210,
-                 alpha = 0.8):
+                 alpha = 0.9):
 
         # For a 2-degree-of-freedom chi-square distribution,
         # here are critical values:

@@ -33,18 +33,10 @@ class LowLevelControl:
         self.brake_decel_map  = np.column_stack(([ 1.6,  3.9, 6.8,  7.1, 7.9],  # deceleration (m/s^2) -> steady state throttle (at 12 m/s^2)
                                                  [  0., 0.25, 0.5, 0.75, 1.0]))
 
-        self.v_prev       = np.nan
-        self.acc_est_lp   = 0.
-        self.acc_alpha_lp = np.exp(-1.0)
-
     def update(self, v_curr, a_des, v_des, df_des):
         control = carla.VehicleControl()
         control.hand_brake = False
         control.manual_gear_shift = False
-
-        # Update acceleration estimate.
-        if not np.isnan(self.v_prev):
-            self.acc_est_lp = (1 - self.acc_alpha_lp) * (v_curr - self.v_prev) / self.dt_control + self.acc_alpha_lp * self.acc_est_lp
 
         # Handling integral windup.
         if np.abs(self.i_curr) > self.i_max:
@@ -52,14 +44,14 @@ class LowLevelControl:
 
         if a_des > self.brake_accel_thresh:
             # Speed related logic.
-            control.throttle = self.k_v * (v_des - v_curr) + self.k_i * self.i_curr
-            control.throttle += np.interp(v_des, self.thr_ff_map[:,0], self.thr_ff_map[:,1])
-            self.i_curr += (v_des - v_curr) * self.dt_control
 
-            # Acceleration-related logic.
-            if not np.isnan(self.v_prev):
-                k_a = 2.0 if v_curr <= 2.0 else 0.01
-                control.throttle += k_a * (a_des - self.acc_est_lp)
+            if v_curr < 2.0 and v_des > v_curr:
+                control.throttle = 1.0 # Needed to overcome friction/drag, etc.
+            else:
+                # Nominal case where we're not at a near stop.
+                control.throttle = self.k_v * (v_des - v_curr) + self.k_i * self.i_curr
+                control.throttle += np.interp(v_des, self.thr_ff_map[:,0], self.thr_ff_map[:,1])
+                self.i_curr += (v_des - v_curr) * self.dt_control
 
         else:
             control.brake    = np.interp( -a_des, self.brake_decel_map[:,0], self.brake_decel_map[:,1])

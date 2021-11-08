@@ -3,6 +3,7 @@ import sys
 import numpy as np
 import time
 from collections import deque
+import matplotlib.pyplot as plt
 
 scriptdir = os.path.abspath(__file__).split('carla')[0] + 'carla/'
 sys.path.append(scriptdir)
@@ -24,7 +25,7 @@ class LanekeepingMPCAgent(DynamicAgent):
                  DT = 0.2,                # s, discretization time for MPC
                  dt = 0.05,               # s, control timestep
                  nominal_speed_mps = 8.0, # sets desired speed (m/s) to track
-                 lat_accel_max = 2.0):    # sets the maximum lateral acceleration (m/s^2)
+                 lat_accel_max = 3.0):    # sets the maximum lateral acceleration (m/s^2)
 
         super().__init__(vehicle=vehicle,
                          goal_location=goal_location,
@@ -102,41 +103,68 @@ class LanekeepingMPCAgent(DynamicAgent):
               mus     = pred_dict["tvs_mode_dists"][0][0]
               sigmas  = pred_dict["tvs_mode_dists"][1][0]
               tv_dims = pred_dict["tvs_dimensions"][0]
-              conf_threshs = self.confidence_thresh_manager.conf_thresh * np.ones(len(mus))
-              s_lb, s_ub   = self.lane_interval_manager.generate_interval_constraints(s0_ev, v0_ev, v_des,
-                                                                                      x0_tv, y0_tv,
-                                                                                      conf_threshs,
-                                                                                      mus, sigmas, tv_dims)
+              conf_threshs   = self.confidence_thresh_manager.conf_thresh * np.ones(len(mus))
+              s_lb, s_ub, tb = self.lane_interval_manager.generate_interval_constraints(s0_ev, v0_ev, v_des,
+                                                                                       x0_tv, y0_tv,
+                                                                                       conf_threshs,
+                                                                                       mus, sigmas, tv_dims)
             else:
               s_lb = np.zeros(self.lk_mpc.N)
               s_ub = np.ones((self.lk_mpc.N)) * self._frenet_traj.trajectory[-1, 0]
+              tb   = np.nan
 
-            # Update MPC initial conditions and parameters.
-            update_dict = {}
-            update_dict["s"]            = state_dict["s"]
-            update_dict["ey"]           = state_dict["ey"]
-            update_dict["epsi"]         = state_dict["epsi"]
-            update_dict["v"]            = state_dict["speed"]
-            update_dict["curv_lin_fit"] = curv_lin_fit
-            update_dict["v_ref"]        = v_des
-            update_dict["acc_prev"]     = self.acc_prev
-            update_dict["df_prev"]      = self.df_prev
-            update_dict["s_lb"]         = s_lb
-            update_dict["s_ub"]         = s_ub
-            self.lk_mpc.update(update_dict)
+            # Decide to brake or use MPC solution.
+            if ~np.isnan(tb) and tb < 5:
+              # We opt to just brake.
+              v_des = 0.
+              self.acc_prev = u0[0]
+              self.df_prev  = u0[1]
+            else:
+              # Update MPC initial conditions and parameters.
+              update_dict = {}
+              update_dict["s"]            = state_dict["s"]
+              update_dict["ey"]           = state_dict["ey"]
+              update_dict["epsi"]         = state_dict["epsi"]
+              update_dict["v"]            = state_dict["speed"]
+              update_dict["curv_lin_fit"] = curv_lin_fit
+              update_dict["v_ref"]        = v_des
+              update_dict["acc_prev"]     = self.acc_prev
+              update_dict["df_prev"]      = self.df_prev
+              update_dict["s_lb"]         = s_lb
+              update_dict["s_ub"]         = s_ub
+              self.lk_mpc.update(update_dict)
 
-            # Solve the MPC problem.
-            sol_dict = self.lk_mpc.solve()
+              # Solve the MPC problem.
+              sol_dict = self.lk_mpc.solve()
 
-            # Extract solution and log results.
-            # NOTE: we don't worry about infeasibility due to slack
-            # variables being active, just focusing on the resultant motion.
-            u0         = sol_dict["u_control"]
-            is_opt     = sol_dict["optimal"]
-            solve_time = sol_dict["solve_time"]
-            v_des      = sol_dict["z_mpc"][1, 3] # v one step ahead
-            self.acc_prev = u0[0]
-            self.df_prev  = u0[1]
+              # Extract solution and log results.
+              # NOTE: we don't worry about infeasibility due to slack
+              # variables being active, just focusing on the resultant motion.
+              u0         = sol_dict["u_control"]
+              is_opt     = sol_dict["optimal"]
+              solve_time = sol_dict["solve_time"]
+              v_des      = max(2.0, sol_dict["z_mpc"][1, 3]) # v one step ahead
+              self.acc_prev = u0[0]
+              self.df_prev  = u0[1]
+
+              # if self.lane_interval_manager.count > 1 and self.lane_interval_manager.count % 10 == 0:
+              #   global_init   = np.array([state_dict["x"],
+              #                             state_dict["y"],
+              #                             state_dict["psi"],
+              #                             state_dict["speed"]])
+              #   z_global_traj = self.lk_mpc.get_global_trajectory(sol_dict["u_mpc"], global_init)
+
+              #   plt.figure(1)
+              #   for ind in range(3):
+              #     plt.subplot(1, 3, ind+1)
+              #     plt.plot(z_global_traj[:, 0], z_global_traj[:,1], 'rx')
+              #   plt.savefig(f"{self.lane_interval_manager.count}_XY.png")
+              #   plt.clf()
+
+              #   plt.figure(2)
+              #   [plt.plot(t, s, 'rx') for (t, s) in enumerate(sol_dict["z_mpc"][1:, 0])]
+              #   plt.savefig(f"{self.lane_interval_manager.count}_S.png")
+              #   plt.clf()
 
         # Get low level control -> key things are v_des and df_des for setpoints.
         control =  self._low_level_control.update(state_dict["speed"], # v_curr

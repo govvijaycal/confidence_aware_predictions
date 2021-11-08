@@ -43,7 +43,7 @@ class DynamicAgent(ABC):
         self.lr = vehicle_dims["lr"]
 
         self.DT      =  dt # control timestep, s
-        self.A_MIN   = -5.0  # min accel, m/s^2
+        self.A_MIN   = -3.0  # min accel, m/s^2
         self.A_MAX   =  2.0  # max accel, m/s^2
         self.V_MIN   =  0.0  # min speed, m/s
         self.V_MAX   = 20.0  # max speed, m/s
